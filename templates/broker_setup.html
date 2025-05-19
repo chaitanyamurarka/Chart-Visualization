@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Broker Setup - Trading Platform</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f0f2f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin:0; padding: 1rem; }
+        .setup-card { background-color: white; padding: 30px 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 450px; }
+        .setup-card h2 { font-size: 1.6rem; font-weight: 600; color: #1F2937; margin-bottom: 10px; }
+        .setup-card p { font-size: 0.9rem; color: #4B5563; margin-bottom: 20px; }
+        .setup-card label { display: block; font-weight: 500; color: #374151; margin-bottom: 5px; font-size: 0.9rem; }
+        .setup-card input { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #D1D5DB; margin-bottom: 15px; font-size: 0.95rem; box-sizing: border-box;}
+        .setup-card button { width: 100%; padding: 10px; border-radius: 6px; background-color: #2563EB; color: white; font-size: 1rem; font-weight: 500; cursor: pointer; transition: background-color 0.2s; border: none;}
+        .setup-card button:hover { background-color: #1D4ED8; }
+        .status-message { font-size: 0.85rem; margin-top: 15px; text-align: center;}
+        .logout-link { display: inline-block; margin-top: 20px; font-size: 0.9rem; color: #4B5563; }
+    </style>
+</head>
+<body>
+    <div class="setup-card">
+        <h2>Connect Your Broker (XTS API)</h2>
+        <p>Hi {{ user if user else "User" }}! Please provide your Motilal Oswal XTS API credentials to enable charting and data features. These will be stored securely and used for API interactions.</p>
+        
+        {% if error %}
+            <p class="status-message text-red-500">{{ error }}</p>
+        {% endif %}
+        {% if message %}
+            <p class="status-message text-green-500">{{ message }}</p>
+        {% endif %}
+
+        <form method="POST" action="{{ url_for('broker_setup_page_route') }}">
+            <div><label for="api_key">XTS API Key:</label><input type="text" id="api_key" name="api_key" required></div>
+            <div><label for="api_secret">XTS API Secret:</label><input type="password" id="api_secret" name="api_secret" required></div>
+            <button type="submit">Save & Connect to XTS</button>
+        </form>
+        
+        {% if creds_exist %}
+        <p class="status-message text-sm text-gray-600 mt-4">Broker credentials are on file. You can update them above if needed.</p>
+        <div class="mt-4 text-center">
+            <a href="{{ url_for('chart_page_route') }}" class="text-indigo-600 hover:text-indigo-800 font-medium">Proceed to Charting &rarr;</a>
+        </div>
+        {% endif %}
+
+        <form action="{{ url_for('platform_logout_route') }}" method="POST" class="mt-6 text-center">
+            <button type="submit" class="text-sm text-gray-600 hover:text-red-700">Logout from Platform</button>
+        </form>
+    </div>
+</body>
+</html>

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome - Trading Visualization Platform</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .hero-bg { background: linear-gradient(to right, #667eea, #764ba2); } /* Example gradient */
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div class="hero-bg text-white min-h-screen flex flex-col items-center justify-center p-6">
+        <h1 class="text-5xl font-bold mb-6 text-center shadow-md">Advanced Trading Visualization</h1>
+        <p class="text-xl mb-10 text-center max-w-2xl">
+            Unlock powerful charting tools and visualize your Python-based trading strategies with unparalleled clarity and speed.
+        </p>
+        <div class="space-x-4">
+            <a href="{{ url_for('platform_login_route') }}" 
+               class="bg-white text-indigo-600 font-semibold py-3 px-8 rounded-lg shadow-lg hover:bg-gray-100 transition duration-300">
+               Platform Login
+            </a>
+            <a href="{{ url_for('platform_signup_route') }}" 
+               class="bg-green-500 hover:bg-green-600 text-white font-semibold py-3 px-8 rounded-lg shadow-lg transition duration-300">
+               Sign Up Now
+            </a>
+        </div>
+        <div class="mt-16 text-center">
+            <h3 class="text-2xl font-semibold mb-4">Platform Features</h3>
+            <div class="grid md:grid-cols-3 gap-8 max-w-4xl">
+                <div class="bg-white/20 p-6 rounded-lg backdrop-blur-md">
+                    <h4 class="font-bold text-lg mb-2">Low-Latency Charts</h4>
+                    <p class="text-sm">Experience real-time data visualization with Lightweight Charts™.</p>
+                </div>
+                <div class="bg-white/20 p-6 rounded-lg backdrop-blur-md">
+                    <h4 class="font-bold text-lg mb-2">Strategy Integration</h4>
+                    <p class="text-sm">Visualize outputs from your custom Python trading strategies.</p>
+                </div>
+                <div class="bg-white/20 p-6 rounded-lg backdrop-blur-md">
+                    <h4 class="font-bold text-lg mb-2">Broker Connectivity</h4>
+                    <p class="text-sm">Connect securely to your Motilal Oswal XTS API account.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

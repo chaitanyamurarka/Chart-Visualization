@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Chart - {{ username if username else 'Platform' }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        /* ... (your existing styles - ensure .hidden { display: none !important; } is present) ... */
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; height: 100vh; margin: 0; display: flex; flex-direction: column; }
+        .page-content-wrapper { display: flex; flex-direction: column; flex-grow: 1; overflow-y: auto; } 
+        #chart-container { width: 100%; flex-grow: 1; min-height: 350px; background-color: white; }
+        .control-panel select, .control-panel button, .control-panel input { padding: 10px 15px; border-radius: 8px; border: 1px solid #D1D5DB; background-color: white; margin-right: 12px; margin-bottom: 8px; font-size: 0.9rem; }
+        .control-panel button { background-color: #3B82F6; color: white; cursor: pointer; transition: background-color 0.2s; }
+        .control-panel button:hover { background-color: #2563EB; }
+        .control-panel label { font-weight: 600; color: #374151; margin-right: 6px; }
+        #scrip-search { padding: 10px 15px; border-radius: 8px; border: 1px solid #D1D5DB; margin-right: 2px; }
+        #scrip-select { max-width: 250px; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <div class="page-content-wrapper container mx-auto p-4 md:p-6"> 
+        <header class="site-header mb-6 flex justify-between items-center flex-shrink-0">
+            <h1 class="text-2xl md:text-3xl font-bold text-gray-700">Trading Chart <span class="text-indigo-600 text-lg">({{ username if username else 'User' }})</span></h1>
+            <div>
+                <button id="download-master-btn" class="text-sm !py-2 !px-3">Refresh Masters</button>
+                <form id="logout-form" action="{{ url_for('platform_logout_route') }}" method="POST" style="display: inline;">
+                    <button type="submit" id="logout-btn" class="text-sm !py-2 !px-3 !bg-red-500 hover:!bg-red-600 text-white">Logout Platform</button>
+                </form>
+            </div>
+        </header>
+        
+        <div class="control-panel bg-white p-5 rounded-xl shadow-lg mb-6 flex flex-wrap items-center flex-shrink-0">
+            <div class="mr-6 mb-3 md:mb-0">
+                <label for="scrip-search">Scrip:</label>
+                <input type="text" id="scrip-search" placeholder="Search scrips...">
+                <select id="scrip-select"></select>
+            </div>
+            <div class="mr-6 mb-3 md:mb-0"><label for="timeframe-select">Timeframe:</label>
+                <select id="timeframe-select">
+                    <option value="1min">1 Minute</option><option value="5min" selected>5 Minutes</option><option value="15min">15 Minutes</option>
+                    <option value="1H">1 Hour</option><option value="1D">1 Day</option>
+                </select>
+            </div>
+            <button id="load-chart-btn">Load Chart</button>
+        </div>
+        
+        <div id="chart-container" class="rounded-xl shadow-lg p-1"></div>
+        <div id="status-messages" class="mt-4 p-3 rounded-md text-sm hidden flex-shrink-0"></div>
+    </div>
+
+    <script>
+        // --- DOM Element References (Ensure these are at the very top) ---
+        const logoutBtnElement = document.getElementById('logout-btn'); // Changed variable name for clarity
+        const scripSelect = document.getElementById('scrip-select');
+        const scripSearchInput = document.getElementById('scrip-search');
+        const timeframeSelect = document.getElementById('timeframe-select');
+        const loadChartBtn = document.getElementById('load-chart-btn');
+        const chartContainer = document.getElementById('chart-container');
+        const statusMessages = document.getElementById('status-messages');
+        const downloadMasterBtn = document.getElementById('download-master-btn');
+
+        // --- State Variables ---
+        let chart = null, candleSeries = null, volumeSeries = null;
+        let managedPriceLines = [], currentScripDetails = null;
+        let allScripsCache = [];
+        let searchDebounceTimer = null;
+
+        // --- Constants ---
+        const API_BASE_URL = ''; 
+        const INITIAL_VISIBLE_CANDLES = 100;
+        const MAX_SCRIPS_IN_DROPDOWN = 200; 
+        const SEARCH_DEBOUNCE_DELAY = 300;
+
+        // --- Utility Functions ---
+        function showStatusMessage(message, isError = false, isSuccess = false) {
+            if (!statusMessages) return;
+            statusMessages.textContent = message;
+            statusMessages.className = `mt-4 p-3 rounded-md text-sm ${isError ? 'bg-red-100 text-red-700' : (isSuccess ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700')}`;
+            statusMessages.classList.remove('hidden');
+            setTimeout(() => { if (statusMessages) statusMessages.classList.add('hidden'); }, isError || isSuccess ? 7000 : 4000);
+        }
+
+        // --- Charting Functions ---
+        function initializeNewChart() {
+            // ... (Keep your working initializeNewChart function here from previous version)
+            return new Promise((resolve, reject) => {
+                if (!chartContainer) { console.error("Chart container missing!"); reject(new Error("Chart container not found")); return; }
+                if (typeof LightweightCharts === 'undefined') { console.error("LightweightCharts lib missing!"); reject(new Error("Charting library not loaded")); return; }
+                chartContainer.innerHTML = '';
+                requestAnimationFrame(() => {
+                    try {
+                        const chartOptions = {
+                            width: chartContainer.clientWidth, height: chartContainer.clientHeight,
+                            layout: { background: { type: 'solid', color: '#ffffff' }, textColor: 'rgba(33, 56, 77, 1)'},
+                            grid: { vertLines: { color: 'rgba(230, 230, 230, 1)' }, horzLines: { color: 'rgba(230, 230, 230, 1)' }},
+                            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+                            rightPriceScale: { borderColor: 'rgba(197, 203, 206, 0.8)', scaleMargins: { top: 0.2, bottom: 0.15 }},
+                            timeScale: { borderColor: 'rgba(197, 203, 206, 0.8)', timeVisible: true, secondsVisible: false, fixLeftEdge: true, fixRightEdge: true},
+                            watermark: { color: 'rgba(150, 150, 150, 0.1)', visible: true, text: currentScripDetails?.displayName || "Chart", fontSize: 48, horzAlign: 'center', vertAlign: 'center'},
+                        };
+                        chart = LightweightCharts.createChart(chartContainer, chartOptions);
+                        candleSeries = chart.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350', borderDownColor: '#ef5350', borderUpColor: '#26a69a', wickDownColor: '#ef5350', wickUpColor: '#26a69a' });
+                        volumeSeries = chart.addHistogramSeries({ color: '#A9A9A9', priceFormat: { type: 'volume' }, priceScaleId: 'volume_scale', lastValueVisible: true });
+                        if (chart.priceScale('volume_scale') && typeof chart.priceScale('volume_scale').applyOptions === 'function') {
+                           chart.priceScale('volume_scale').applyOptions({ scaleMargins: { top: 0.7, bottom: 0 } });
+                        }
+                        resolve();
+                    } catch (e) { reject(e); }
+                });
+            });
+        }
+
+        async function createOrUpdateChart(backendChartData) {
+            // ... (Keep your simplified createOrUpdateChart function here from previous version)
+             console.log(`%c[ChartPage] createOrUpdateChart called. Received ${backendChartData ? backendChartData.length : 0} pre-validated points.`, "color: blue;");
+            if (chart) { try { chart.remove(); } catch (e) {} chart = null; candleSeries = null; volumeSeries = null; }
+
+            try {
+                await initializeNewChart();
+                if (!chart || !candleSeries || !volumeSeries) { throw new Error("Chart/series not initialized."); }
+
+                let finalOhlcData = [], finalVolumeData = [];
+                if (backendChartData && Array.isArray(backendChartData) && backendChartData.length > 0) {
+                    for (const d of backendChartData) {
+                        if (d && d.time != null && d.open != null && d.high != null && d.low != null && d.close != null && d.volume != null) {
+                            finalOhlcData.push({ time: Number(d.time), open: Number(d.open), high: Number(d.high), low: Number(d.low), close: Number(d.close) });
+                            finalVolumeData.push({ time: Number(d.time), value: Number(d.volume), color: Number(d.close) >= Number(d.open) ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' });
+                        } else { console.warn(`[ChartPage] Skipping malformed data point from backend: ${JSON.stringify(d)}`); }
+                    }
+                }
+                
+                if (finalOhlcData.length > 0) {
+                    candleSeries.setData(finalOhlcData);
+                    if (volumeSeries) volumeSeries.setData(finalVolumeData);
+                    showStatusMessage(`Chart rendered with ${finalOhlcData.length} candles.`, false, true);
+                } else {
+                     if(candleSeries) candleSeries.setData([]); if(volumeSeries) volumeSeries.setData([]);
+                     showStatusMessage(backendChartData && backendChartData.length > 0 ? "No valid data after frontend mapping." : "No data received for chart.", true);
+                }
+                const dataLength = finalOhlcData.length;
+                if (dataLength > 0 && chart.timeScale) { chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, dataLength - INITIAL_VISIBLE_CANDLES), to: dataLength -1 });
+                } else if (chart.timeScale) { chart.timeScale().fitContent(); }
+            } catch (error) { console.error("Error in createOrUpdateChart:", error); showStatusMessage("Error creating/updating chart.", true); }
+        }
+
+        function clearAllManagedPriceLines() { /* ... */ }
+        async function loadAndDisplayStrategyMarkers(scrip, timeframe) { /* ... */ }
+        
+        function filterAndDisplayScrips(searchTerm = "") {
+            // ... (Keep your working filterAndDisplayScrips function here)
+            const lowerSearchTerm = searchTerm.toLowerCase();
+            if (!scripSelect) { return; }
+            scripSelect.innerHTML = ''; let optionsAdded = 0; const fragment = document.createDocumentFragment();
+            if (!allScripsCache || allScripsCache.length === 0) {
+                const o = document.createElement('option'); o.disabled = true; o.textContent = "No scrips loaded."; fragment.appendChild(o);
+                scripSelect.appendChild(fragment); return;
+            }
+            for (let i = 0; i < allScripsCache.length; i++) {
+                const item = allScripsCache[i];
+                if (item && item.displayName && (searchTerm === "" || item.displayName.toLowerCase().includes(lowerSearchTerm))) {
+                    if (optionsAdded < MAX_SCRIPS_IN_DROPDOWN) {
+                        const o = document.createElement('option'); o.value = item.displayName; o.textContent = item.displayName;
+                        if (item.exchangeInstrumentID != null && item.exchangeSegment != null) {
+                            o.dataset.instrumentId = String(item.exchangeInstrumentID); o.dataset.segment = String(item.exchangeSegment);
+                            fragment.appendChild(o); optionsAdded++;
+                        }
+                    } else {
+                        if (searchTerm !== "" && !fragment.querySelector('.more-results-indicator')) {
+                            const o = document.createElement('option'); o.disabled = true; o.textContent = `More results...`; o.classList.add('more-results-indicator'); fragment.appendChild(o); break;
+                        }
+                        if (searchTerm === "") break; 
+                    }
+                }
+            }
+            scripSelect.appendChild(fragment);
+            if (optionsAdded === 0) { /* ... no results option ... */ }
+        }
+
+        async function populateScrips() {
+            // ... (Keep your working populateScrips function here, ensure API call is to /api/scrips)
+            console.log("%c[populateScrips] Called.", "color: blue; font-weight: bold;");
+            showStatusMessage("Loading scrips...", false, false);
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/scrips`); // Ensure /api prefix
+                if (!response.ok) { allScripsCache = []; filterAndDisplayScrips(); throw new Error(`HTTP error ${response.status}`); }
+                allScripsCache = await response.json();
+                console.log(`[populateScrips] Scrips cached: ${allScripsCache.length}`);
+                filterAndDisplayScrips(); 
+                let defaultSelected = false; let preferred = ["RELIANCE", "NIFTY 50"];
+                if (scripSelect && scripSelect.options.length > 0) { /* ... default selection logic ... */ }
+                if (scripSelect && scripSelect.options.length > 0 && scripSelect.selectedIndex !== -1 && scripSelect.options[scripSelect.selectedIndex]?.dataset.instrumentId) {
+                    await loadChartData();
+                } else { showStatusMessage(allScripsCache.length > 0 ? "Scrips loaded." : "No scrips.", false); }
+            } catch (error) { console.error('[populateScrips] Error:', error); showStatusMessage("Error scrips: " + error.message, true); allScripsCache = []; filterAndDisplayScrips(); }
+        }
+        
+        if(scripSearchInput) { scripSearchInput.addEventListener('input', () => { clearTimeout(searchDebounceTimer); searchDebounceTimer = setTimeout(() => { filterAndDisplayScrips(scripSearchInput.value); }, SEARCH_DEBOUNCE_DELAY); }); }
+
+        async function loadChartData() {
+            // ... (Keep your working loadChartData function here, ensure API call is to /api/historical-data)
+            // ... Ensure it uses the renamed logoutBtnElement if needed within this function, or rely on global logoutBtnElement
+            console.log("%c[loadChartData] Initiated.", "color: #28a745; font-weight: bold;");
+            const selectedIndex = scripSelect ? scripSelect.selectedIndex : -1;
+            const selectedOption = scripSelect && selectedIndex !== -1 ? scripSelect.options[selectedIndex] : null;
+            if (!selectedOption || !selectedOption.dataset || !selectedOption.dataset.instrumentId || !selectedOption.dataset.segment) {
+                showStatusMessage("No valid scrip selected.", true); await createOrUpdateChart([]); return;
+            }
+            currentScripDetails = { displayName: selectedOption.value, exchangeInstrumentID: selectedOption.dataset.instrumentId, exchangeSegment: selectedOption.dataset.segment };
+            const tf = timeframeSelect.value;
+            showStatusMessage(`Loading chart for ${currentScripDetails.displayName} (${tf})...`);
+            try {
+                const url = `${API_BASE_URL}/api/historical-data?scrip=${encodeURIComponent(currentScripDetails.displayName)}&timeframe=${encodeURIComponent(tf)}&exchangeSegment=${encodeURIComponent(currentScripDetails.exchangeSegment)}&exchangeInstrumentID=${encodeURIComponent(currentScripDetails.exchangeInstrumentID)}`;
+                const response = await fetch(url);
+                if (!response.ok) { const errTxt = await response.text(); throw new Error(`${response.status} ${response.statusText} - ${errTxt}`); }
+                const data = await response.json();
+                await createOrUpdateChart(data); await loadAndDisplayStrategyMarkers(currentScripDetails, tf);
+            } catch (error) { console.error('[loadChartData] Error:', error); showStatusMessage('Error loading chart data.', true); await createOrUpdateChart([]); }
+        }
+
+        // --- Event Listeners ---
+        if(logoutBtnElement) { // Use the renamed const
+            logoutBtnElement.addEventListener('click', async (event) => {
+                event.preventDefault(); // Prevent default form submission if it's still a submit button inside a form
+                console.log("[Logout Button] Clicked");
+                try {
+                    const form = document.getElementById('logout-form'); // Get form to submit if needed, or just fetch
+                    // If your logout is a simple POST request without form data:
+                     await fetch(`${API_BASE_URL}/logout`, { method: 'POST' }); // Ensure correct logout URL from backend
+                     window.location.href = `${API_BASE_URL}/`; 
+                } catch (error) { console.error("Logout error:", error); showStatusMessage("Logout request failed.", true); }
+            });
+        } else { console.error("Logout button element not found!");}
+        
+        if(loadChartBtn) { loadChartBtn.addEventListener('click', async () => { await loadChartData(); }); }
+        
+        if(downloadMasterBtn) { /* ... (ensure your download logic is here and API path is /api/...) ... */ }
+        window.addEventListener('resize', () => { if (chart && chartContainer) { chart.applyOptions({ width: chartContainer.clientWidth, height: chartContainer.clientHeight }); } });
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            console.log("Chart Page DOM fully loaded.");
+            const localLogoutBtn = document.getElementById('logout-btn'); // Get it here as well, as const might not be ready
+            if(localLogoutBtn) {
+                localLogoutBtn.classList.remove('hidden');
+                console.log("[DOMContentLoaded] Logout button made visible.");
+            } else {
+                console.error("[DOMContentLoaded] logoutBtn element NOT FOUND when DOMContentLoaded fired!");
+            }
+            // User is authenticated if they reached this page (due to backend route protection)
+            showStatusMessage("Loading application data...", false);
+            if (typeof populateScrips === 'function') {
+                await populateScrips();
+            } else {
+                console.error("populateScrips function is not defined!");
+            }
+        });
+    </script>
+</body>
+</html>

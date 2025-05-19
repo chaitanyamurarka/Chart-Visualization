@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XTS API Login - Trading Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #111827; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin:0; padding: 1rem;}
+        #login-card { background-color: white; padding: 30px 40px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); width: 100%; max-width: 420px; text-align: center; } /* Increased max-width slightly */
+        #login-card h2 { font-size: 1.5rem; /* Adjusted size */ font-weight: 600; /* Slightly less bold */ color: #1F2937; margin-bottom: 15px; }
+        #login-card p.subtitle { font-size: 0.9rem; color: #4B5563; margin-bottom: 25px; }
+        #login-card label { display: block; text-align: left; font-weight: 600; color: #4B5563; margin-bottom: 6px; font-size: 0.85rem; }
+        #login-card input { width: 100%; padding: 10px 14px; border-radius: 8px; border: 1px solid #D1D5DB; margin-bottom: 18px; font-size: 0.95rem; box-sizing: border-box;}
+        #login-card button { width: 100%; padding: 10px 15px; border-radius: 8px; background-color: #3B82F6; color: white; font-size: 1rem; font-weight: 500; cursor: pointer; transition: background-color 0.2s; border: none;}
+        #login-card button:hover { background-color: #2563EB; }
+        #login-status { font-size: 0.85rem; margin-top: 18px; min-height: 1.1em; color: #6B7280;}
+    </style>
+</head>
+<body>
+    <div id="login-card">
+        <h2>Connect to Motilal Oswal XTS API</h2>
+        <p class="subtitle">Please enter your XTS API Key and API Secret to access market data and charting features.</p>
+        <div><label for="api-key">Your XTS API Key:</label><input type="text" id="api-key" placeholder="Enter your XTS API Key"></div>
+        <div><label for="api-secret">Your XTS API Secret:</label><input type="password" id="api-secret" placeholder="Enter your XTS API Secret"></div>
+        <button id="login-btn">Login with XTS Credentials</button>
+        <p id="login-status"></p>
+    </div>
+
+    <script>
+        const loginBtn = document.getElementById('login-btn');
+        const apiKeyInput = document.getElementById('api-key');
+        const apiSecretInput = document.getElementById('api-secret');
+        const loginStatus = document.getElementById('login-status');
+        
+        if (loginBtn) {
+            loginBtn.addEventListener('click', async () => {
+                const apiKey = apiKeyInput.value.trim();
+                const apiSecret = apiSecretInput.value.trim();
+
+                if (!apiKey || !apiSecret) {
+                    loginStatus.textContent = 'API Key and Secret are required.';
+                    loginStatus.style.color = 'red';
+                    return;
+                }
+                loginStatus.textContent = 'Attempting XTS API login...';
+                loginStatus.style.color = '#6B7280';
+
+                try {
+                    const response = await fetch(`/login`, { 
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ apiKey, apiSecret })
+                    });
+                    const result = await response.json();
+
+                    if (response.ok && result.type === 'success') {
+                        loginStatus.textContent = 'XTS API Login Successful! Redirecting...';
+                        loginStatus.style.color = 'green';
+                        window.location.href = `/chart`;
+                    } else {
+                        loginStatus.textContent = `XTS API Login Failed: ${result.description || result.message || 'Unknown error'}`;
+                        loginStatus.style.color = 'red';
+                    }
+                } catch (error) {
+                    console.error("Login request error:", error);
+                    loginStatus.textContent = 'Login request failed. Please ensure the backend server is running and accessible.';
+                    loginStatus.style.color = 'red';
+                }
+            });
+        } else {
+            console.error("Login button not found on login page.");
+        }
+    </script>
+</body>
+</html>

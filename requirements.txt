@@ -1,0 +1,10 @@
+Flask
+Flask-CORS
+python-socketio
+requests
+six
+werkzeug
+python-engineio
+websocket-client
+gunicorn
+eventlet 

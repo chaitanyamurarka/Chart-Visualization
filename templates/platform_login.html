@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - Trading Platform</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f0f2f5; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin:0; padding: 1rem; }
+        .auth-card { background-color: white; padding: 30px 40px; border-radius: 10px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
+        .auth-card h2 { font-size: 1.75rem; font-weight: 600; color: #1F2937; margin-bottom: 20px; text-align: center; }
+        .auth-card label { display: block; font-weight: 500; color: #374151; margin-bottom: 5px; font-size: 0.9rem; }
+        .auth-card input { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #D1D5DB; margin-bottom: 15px; font-size: 0.95rem; box-sizing: border-box;}
+        .auth-card button { width: 100%; padding: 10px; border-radius: 6px; background-color: #3B82F6; color: white; font-size: 1rem; font-weight: 500; cursor: pointer; transition: background-color 0.2s; border: none;}
+        .auth-card button:hover { background-color: #2563EB; }
+        .auth-status { font-size: 0.85rem; margin-top: 15px; text-align: center;}
+        .auth-link { display: block; text-align: center; margin-top: 20px; font-size: 0.9rem; color: #4B5563; hover:text-indigo-600; }
+    </style>
+</head>
+<body>
+    <div class="auth-card">
+        <h2>Platform Login</h2>
+        {% if error %}
+            <p class="auth-status text-red-500">{{ error }}</p>
+        {% endif %}
+        <form method="POST" action="{{ url_for('platform_login_route') }}">
+            <div><label for="username">Username:</label><input type="text" id="username" name="username" required></div>
+            <div><label for="password">Password:</label><input type="password" id="password" name="password" required></div>
+            <button type="submit">Login</button>
+        </form>
+        <a href="{{ url_for('platform_signup_route') }}" class="auth-link">Don't have an account? Sign Up</a>
+    </div>
+</body>
+</html>
