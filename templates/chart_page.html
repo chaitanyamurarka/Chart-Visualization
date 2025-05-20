@@ -44,6 +44,18 @@
                     <option value="1H">1 Hour</option><option value="1D">1 Day</option>
                 </select>
             </div>
+            <div class="mr-6 mb-3 md:mb-0">
+                <label for="st-period">ST Period:</label>
+                <input type="number" id="st-period" value="10" min="1" class="!w-20">
+            </div>
+            <div class="mr-6 mb-3 md:mb-0">
+                <label for="st-multiplier">ST Multiplier:</label>
+                <input type="number" id="st-multiplier" value="3" step="0.1" min="0.1" class="!w-20">
+            </div>
+            <div class="mr-6 mb-3 md:mb-0 flex items-center">
+                <input type="checkbox" id="show-supertrend-checkbox" checked class="mr-2 h-5 w-5 text-blue-600 border-gray-300 rounded focus:ring-blue-500">
+                <label for="show-supertrend-checkbox" class="font-medium text-gray-700">Show Supertrend</label>
+            </div>
             <button id="load-chart-btn">Load Chart</button>
         </div>
         
@@ -61,32 +73,35 @@
         const chartContainer = document.getElementById('chart-container');
         const statusMessages = document.getElementById('status-messages');
         const downloadMasterBtn = document.getElementById('download-master-btn');
+        const stPeriodInput = document.getElementById('st-period');
+        const stMultiplierInput = document.getElementById('st-multiplier');
+        const showSupertrendCheckbox = document.getElementById('show-supertrend-checkbox'); // Added
 
         // --- State Variables ---
         let chart = null, candlestickSeries = null, volumeSeries = null;
+        let supertrendLineSeries = null; 
         let allScripsCache = [];
         let searchDebounceTimer = null;
 
         let currentChartData = {
-            instrument: null, // Stores { displayName, exchangeInstrumentID, exchangeSegment }
-            timeframeMinutes: 5, // Default, will be updated
-            lastCandle: null, // Stores latest candle object { time, open, high, low, close, volume }
+            instrument: null, 
+            timeframeMinutes: 5, 
+            lastCandle: null, 
             socket: null,
-            isSubscribed: false, // Track current subscription status
-            currentRoom: null    // Store the room joined
+            isSubscribed: false, 
+            currentRoom: null,
+            priceLines: {} 
         };
         
         // --- Constants ---
         const API_BASE_URL = ''; 
-        const INITIAL_VISIBLE_CANDLES = 100;
+        const INITIAL_VISIBLE_CANDLES = 120;
         const MAX_SCRIPS_IN_DROPDOWN = 200; 
         const SEARCH_DEBOUNCE_DELAY = 300;
-         // This map needs to align with backend's XTS_SEGMENT_CODE_MAP keys if used for room construction logic frontend-side
         const SEGMENT_NAME_TO_CODE_MAP = {
             "NSECM": 1, "NSEFO": 2, "NSECUR": 3, "MCXFO": 4, "NCDEXFO": 5,
             "BSECM": 13, "BSEFO": 14, "BSECDS": 15, "NSEIDX": 20 
         };
-
 
         // --- Utility Functions ---
         function showStatusMessage(message, isError = false, isSuccess = false) {
@@ -102,66 +117,147 @@
             return new Promise((resolve, reject) => {
                 if (!chartContainer) { console.error("Chart container missing!"); reject(new Error("Chart container not found")); return; }
                 if (typeof LightweightCharts === 'undefined') { console.error("LightweightCharts lib missing!"); reject(new Error("Charting library not loaded")); return; }
-                chartContainer.innerHTML = ''; // Clear previous chart
-                requestAnimationFrame(() => { // Ensure DOM is ready for new chart
+                
+                chartContainer.innerHTML = ''; 
+                
+                requestAnimationFrame(() => { 
                     try {
                         const watermarkText = currentChartData.instrument ? currentChartData.instrument.displayName : "Chart";
                         const chartOptions = {
                             width: chartContainer.clientWidth, height: chartContainer.clientHeight,
                             layout: { background: { type: 'solid', color: '#ffffff' }, textColor: 'rgba(33, 56, 77, 1)'},
-                            grid: { vertLines: { color: 'rgba(230, 230, 230, 1)' }, horzLines: { color: 'rgba(230, 230, 230, 1)' }},
+                            grid: { vertLines: { color: 'rgba(230, 230, 230, 0.5)' }, horzLines: { color: 'rgba(230, 230, 230, 0.5)' }},
                             crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-                            rightPriceScale: { borderColor: 'rgba(197, 203, 206, 0.8)', scaleMargins: { top: 0.2, bottom: 0.15 }},
-                            timeScale: { borderColor: 'rgba(197, 203, 206, 0.8)', timeVisible: true, secondsVisible: false, fixLeftEdge: true, fixRightEdge: true},
-                            watermark: { color: 'rgba(150, 150, 150, 0.1)', visible: true, text: watermarkText, fontSize: 48, horzAlign: 'center', vertAlign: 'center'},
+                            rightPriceScale: { borderColor: 'rgba(197, 203, 206, 0.8)', scaleMargins: { top: 0.25, bottom: 0.15 }},
+                            timeScale: { borderColor: 'rgba(197, 203, 206, 0.8)', timeVisible: true, secondsVisible: (currentChartData.timeframeMinutes * 60) < 300, fixLeftEdge: true, fixRightEdge: true},
+                            watermark: { color: 'rgba(150, 150, 150, 0.05)', visible: true, text: watermarkText, fontSize: 48, horzAlign: 'center', vertAlign: 'center'},
                         };
                         chart = LightweightCharts.createChart(chartContainer, chartOptions);
-                        candlestickSeries = chart.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350', borderDownColor: '#ef5350', borderUpColor: '#26a69a', wickDownColor: '#ef5350', wickUpColor: '#26a69a' });
-                        volumeSeries = chart.addHistogramSeries({ color: '#A9A9A9', priceFormat: { type: 'volume' }, priceScaleId: 'volume_scale', lastValueVisible: true });
-                        if (chart.priceScale('volume_scale') && typeof chart.priceScale('volume_scale').applyOptions === 'function') {
-                           chart.priceScale('volume_scale').applyOptions({ scaleMargins: { top: 0.7, bottom: 0 } });
-                        }
+                        
+                        candlestickSeries = chart.addCandlestickSeries({ 
+                            upColor: '#26a69a', downColor: '#ef5350', 
+                            borderDownColor: '#ef5350', borderUpColor: '#26a69a', 
+                            wickDownColor: '#ef5350', wickUpColor: '#26a69a' 
+                        });
+                        
+                        volumeSeries = chart.addHistogramSeries({ 
+                            color: '#A9A9A9', priceFormat: { type: 'volume' }, 
+                            priceScaleId: 'volume_scale', lastValueVisible: true 
+                        });
+                        chart.priceScale('volume_scale').applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
+
+                        if (supertrendLineSeries) { try { chart.removeSeries(supertrendLineSeries); } catch(e){} supertrendLineSeries = null; }
+                        supertrendLineSeries = chart.addLineSeries({
+                            color: 'rgba(255, 165, 0, 0.9)', 
+                            lineWidth: 2,
+                            lastValueVisible: false, 
+                            priceLineVisible: false,
+                            crosshairMarkerVisible: false, 
+                        });
+                        currentChartData.priceLines = {}; 
+
                         resolve();
                     } catch (e) { console.error("Error initializing chart:", e); reject(e); }
                 });
             });
         }
 
-        async function createOrUpdateChart(backendChartData) {
-            if (chart) { try { chart.remove(); } catch (e) {} chart = null; candlestickSeries = null; volumeSeries = null; }
-            try {
-                await initializeNewChart();
-                if (!chart || !candlestickSeries || !volumeSeries) { throw new Error("Chart/series not initialized after attempt."); }
-
-                let finalOhlcData = [], finalVolumeData = [];
-                currentChartData.lastCandle = null; // Reset last candle on new historical load
-
-                if (backendChartData && Array.isArray(backendChartData) && backendChartData.length > 0) {
-                    for (const d of backendChartData) {
-                        if (d && d.time != null && d.open != null && d.high != null && d.low != null && d.close != null && d.volume != null) {
-                            const candle = { time: Number(d.time), open: Number(d.open), high: Number(d.high), low: Number(d.low), close: Number(d.close), volume: Number(d.volume) };
-                            finalOhlcData.push(candle); // For candlestick series, volume is separate
-                            finalVolumeData.push({ time: Number(d.time), value: Number(d.volume), color: Number(d.close) >= Number(d.open) ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' });
-                        }
+        async function createOrUpdateChart(backendChartData, strategyData = null) {
+            if (!chart || !candlestickSeries || !volumeSeries || !supertrendLineSeries) {
+                console.warn("Chart or series not initialized. Attempting to re-initialize.");
+                try {
+                    await initializeNewChart(); 
+                    if (!chart || !candlestickSeries || !volumeSeries || !supertrendLineSeries) {
+                         throw new Error("Chart/series still not initialized after re-attempt.");
                     }
-                    if (finalOhlcData.length > 0) {
-                        currentChartData.lastCandle = { ...finalOhlcData[finalOhlcData.length - 1] }; // Set last candle from historical data
+                } catch (initError) {
+                    console.error("Fatal error initializing chart:", initError);
+                    showStatusMessage("Critical error setting up chart: " + initError.message, true);
+                    return;
+                }
+            }
+
+            let finalOhlcData = [], finalVolumeData = [];
+            currentChartData.lastCandle = null; 
+
+            if (backendChartData && Array.isArray(backendChartData) && backendChartData.length > 0) {
+                for (const d of backendChartData) {
+                    if (d && d.time != null && d.open != null && d.high != null && d.low != null && d.close != null && d.volume != null) {
+                        const candle = { time: Number(d.time), open: Number(d.open), high: Number(d.high), low: Number(d.low), close: Number(d.close) };
+                        finalOhlcData.push(candle); 
+                        finalVolumeData.push({ time: Number(d.time), value: Number(d.volume), color: Number(d.close) >= Number(d.open) ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' });
                     }
                 }
-                
-                candlestickSeries.setData(finalOhlcData);
-                volumeSeries.setData(finalVolumeData);
+                if (finalOhlcData.length > 0) { 
+                    const lc = finalOhlcData[finalOhlcData.length - 1];
+                    const lcVol = finalVolumeData.find(v => v.time === lc.time);
+                    currentChartData.lastCandle = { ...lc, volume: lcVol ? lcVol.value : 0 };
+                }
+            }
+            
+            candlestickSeries.setData(finalOhlcData);
+            volumeSeries.setData(finalVolumeData);
 
-                if (finalOhlcData.length > 0) {
-                    showStatusMessage(`Chart rendered with ${finalOhlcData.length} candles.`, false, true);
+            // --- Strategy Data Rendering ---
+            const showSupertrend = showSupertrendCheckbox.checked; // Check checkbox state
+
+            if (strategyData && supertrendLineSeries) {
+                supertrendLineSeries.applyOptions({ // Apply visibility based on checkbox
+                    visible: showSupertrend 
+                });
+
+                if (showSupertrend) { // Only set data if it's supposed to be visible
+                    if (strategyData.supertrend_line && Array.isArray(strategyData.supertrend_line)) {
+                        const validSupertrendPoints = strategyData.supertrend_line.filter(p => p.value !== null && !isNaN(parseFloat(p.value)));
+                        supertrendLineSeries.setData(validSupertrendPoints.map(p => ({ time: p.time, value: parseFloat(p.value) })));
+                    } else {
+                        supertrendLineSeries.setData([]); // Clear data if none provided
+                    }
                 } else {
-                     showStatusMessage(backendChartData && backendChartData.length > 0 ? "No valid data after mapping." : "No data received for chart.", true);
+                    supertrendLineSeries.setData([]); // Clear data if not visible
                 }
-                const dataLength = finalOhlcData.length;
-                if (dataLength > 0 && chart.timeScale) { chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, dataLength - INITIAL_VISIBLE_CANDLES), to: dataLength -1 });
-                } else if (chart.timeScale) { chart.timeScale().fitContent(); }
 
-            } catch (error) { console.error("Error in createOrUpdateChart:", error); showStatusMessage("Error creating/updating chart: " + error.message, true); }
+                let currentMarkers = [];
+                // Only show strategy markers if supertrend itself is shown
+                if (showSupertrend) { 
+                    if (strategyData.buy_signals && Array.isArray(strategyData.buy_signals)) {
+                        strategyData.buy_signals.forEach(signal => {
+                            currentMarkers.push({
+                                time: signal.time, position: 'belowBar', color: '#10B981', 
+                                shape: 'arrowUp', text: 'Buy @ ' + parseFloat(signal.price).toFixed(2), size: 1.2
+                            });
+                        });
+                    }
+                    if (strategyData.sell_signals && Array.isArray(strategyData.sell_signals)) {
+                        strategyData.sell_signals.forEach(signal => {
+                            currentMarkers.push({
+                                time: signal.time, position: 'aboveBar', color: '#F43F5E', 
+                                shape: 'arrowDown', text: 'Sell @ ' + parseFloat(signal.price).toFixed(2), size: 1.2
+                            });
+                        });
+                    }
+                }
+                candlestickSeries.setMarkers(currentMarkers); // Set markers (will be empty if showSupertrend is false)
+
+            } else if (supertrendLineSeries) { 
+                supertrendLineSeries.applyOptions({ visible: false }); // Ensure invisible
+                supertrendLineSeries.setData([]);
+                if (candlestickSeries) candlestickSeries.setMarkers([]);
+            }
+            
+            for (const lineId in currentChartData.priceLines) {
+                removePriceLine(lineId);
+            }
+
+            if (finalOhlcData.length > 0) {
+                showStatusMessage(`Chart rendered with ${finalOhlcData.length} candles.`, false, true);
+            } else {
+                 showStatusMessage(backendChartData && backendChartData.length > 0 ? "No valid candle data after mapping." : "No data received for chart.", true);
+            }
+            const dataLength = finalOhlcData.length;
+            if (dataLength > 0 && chart.timeScale) { 
+                chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, dataLength - INITIAL_VISIBLE_CANDLES), to: dataLength }); 
+            } else if (chart.timeScale) { chart.timeScale().fitContent(); }
         }
         
         function filterAndDisplayScrips(searchTerm = "") {
@@ -174,9 +270,13 @@
             }
             for (let i = 0; i < allScripsCache.length; i++) {
                 const item = allScripsCache[i];
-                if (item && item.displayName && (searchTerm === "" || item.displayName.toLowerCase().includes(lowerSearchTerm))) {
+                if (item && typeof item.displayName === 'string' && typeof item.exchangeInstrumentID === 'string' &&
+                    (searchTerm === "" || 
+                     item.displayName.toLowerCase().includes(lowerSearchTerm) || 
+                     item.exchangeInstrumentID.includes(searchTerm))) { 
                     if (optionsAdded < MAX_SCRIPS_IN_DROPDOWN) {
-                        const o = document.createElement('option'); o.value = item.displayName; o.textContent = item.displayName;
+                        const o = document.createElement('option'); o.value = item.displayName; 
+                        o.textContent = `${item.displayName} (${item.exchangeSegment || 'N/A'} : ${item.exchangeInstrumentID})`; 
                         if (item.exchangeInstrumentID != null && item.exchangeSegment != null) {
                             o.dataset.instrumentId = String(item.exchangeInstrumentID); o.dataset.segment = String(item.exchangeSegment);
                             fragment.appendChild(o); optionsAdded++;
@@ -191,7 +291,9 @@
             }
             scripSelect.appendChild(fragment);
             if (optionsAdded === 0 && searchTerm !== "") { 
-                const o = document.createElement('option'); o.disabled = true; o.textContent = "No matching scrips found."; fragment.appendChild(o);
+                const o = document.createElement('option'); o.disabled = true; o.textContent = "No matching scrips found."; scripSelect.appendChild(o);
+            } else if (optionsAdded === 0 && searchTerm === "") {
+                 const o = document.createElement('option'); o.disabled = true; o.textContent = "No scrips to display."; scripSelect.appendChild(o);
             }
         }
 
@@ -201,29 +303,39 @@
                 const response = await fetch(`${API_BASE_URL}/api/scrips`);
                 if (!response.ok) { throw new Error(`HTTP error ${response.status}`); }
                 allScripsCache = await response.json();
+                
+                console.log("AllScripsCache from backend:", JSON.stringify(allScripsCache, null, 2)); 
+                    
                 filterAndDisplayScrips(); 
                 if (scripSelect && scripSelect.options.length > 0) {
-                    // Try to select a default like RELIANCE or NIFTY 50 if available
                     let defaultSelected = false;
-                    const preferredDefaults = ["RELIANCE", "NIFTY 50"];
+                    const preferredDefaults = ["NIFTY 50", "BANKNIFTY", "RELIANCE"]; 
                     for (const pref of preferredDefaults) {
                         for (let i=0; i<scripSelect.options.length; i++) {
-                            if (scripSelect.options[i].value.toUpperCase() === pref.toUpperCase()) {
+                            if (scripSelect.options[i].value.toUpperCase().startsWith(pref.toUpperCase())) { 
                                 scripSelect.selectedIndex = i; defaultSelected = true; break;
                             }
                         }
                         if (defaultSelected) break;
                     }
-                    if (!defaultSelected) scripSelect.selectedIndex = 0; // Fallback to first if no preferred found
+                    if (!defaultSelected && scripSelect.options.length > 0) scripSelect.selectedIndex = 0; 
                 }
 
                 if (scripSelect && scripSelect.options.length > 0 && scripSelect.selectedIndex !== -1 && scripSelect.options[scripSelect.selectedIndex]?.dataset.instrumentId) {
-                    await loadChartDataAndUpdateState(); // This will also trigger subscription
+                    await loadChartDataAndUpdateState(); 
                 } else { 
-                    showStatusMessage(allScripsCache.length > 0 ? "Scrips loaded. Select one to load chart." : "No scrips available.", false, !allScripsCache.length > 0); 
-                    await createOrUpdateChart([]); // Show empty chart
+                    showStatusMessage(allScripsCache.length > 0 ? "Scrips loaded. Select one." : "No scrips available. Please Refresh Masters.", allScripsCache.length === 0, false); 
+                    if (!chart) await initializeNewChart(); 
+                    await createOrUpdateChart([], null); 
                 }
-            } catch (error) { console.error('[populateScrips] Error:', error); showStatusMessage("Error loading scrips: " + error.message, true); allScripsCache = []; filterAndDisplayScrips(); await createOrUpdateChart([]); }
+            } catch (error) { 
+                console.error('[populateScrips] Error:', error); 
+                showStatusMessage("Error loading scrips: " + error.message, true); 
+                allScripsCache = []; 
+                filterAndDisplayScrips(); 
+                if (!chart) await initializeNewChart(); 
+                await createOrUpdateChart([], null); 
+            }
         }
         
         if(scripSearchInput) { scripSearchInput.addEventListener('input', () => { clearTimeout(searchDebounceTimer); searchDebounceTimer = setTimeout(() => { filterAndDisplayScrips(scripSearchInput.value); }, SEARCH_DEBOUNCE_DELAY); }); }
@@ -233,58 +345,77 @@
             const selectedIndex = scripSelect ? scripSelect.selectedIndex : -1;
             const selectedOption = scripSelect && selectedIndex !== -1 ? scripSelect.options[selectedIndex] : null;
             
-            if (currentChartData.isSubscribed && currentChartData.instrument) {
-                unsubscribeFromInstrumentFeed(currentChartData.instrument); // Unsubscribe from previous
-                currentChartData.isSubscribed = false;
-                currentChartData.currentRoom = null;
+            const newInstrumentId = selectedOption ? selectedOption.dataset.instrumentId : null;
+            const newSegment = selectedOption ? selectedOption.dataset.segment : null;
+            const newDisplayName = selectedOption ? selectedOption.value : null;
+
+            if (currentChartData.instrument && currentChartData.isSubscribed &&
+                ( String(currentChartData.instrument.exchangeInstrumentID) !== newInstrumentId || currentChartData.instrument.exchangeSegment !== newSegment)) {
+                console.log("Instrument changed, unsubscribing from old:", currentChartData.instrument);
+                unsubscribeFromInstrumentFeed(currentChartData.instrument);
             }
 
-            if (!selectedOption || !selectedOption.dataset || !selectedOption.dataset.instrumentId || !selectedOption.dataset.segment) {
+            if (!selectedOption || !newInstrumentId || !newSegment) {
                 showStatusMessage("No valid scrip selected.", true); 
-                currentChartData.instrument = null; // Clear current instrument
-                await createOrUpdateChart([]); return;
+                currentChartData.instrument = null; 
+                if (!chart) await initializeNewChart();
+                await createOrUpdateChart([], null); return;
             }
 
-            // Update current instrument details
             currentChartData.instrument = { 
-                displayName: selectedOption.value, 
-                exchangeInstrumentID: parseInt(selectedOption.dataset.instrumentId), 
-                exchangeSegment: selectedOption.dataset.segment
+                displayName: newDisplayName, 
+                exchangeInstrumentID: parseInt(newInstrumentId), 
+                exchangeSegment: newSegment
             };
-            updateCurrentTimeframeFromSelector(); // Update timeframe state
+            updateCurrentTimeframeFromSelector(); 
 
             const tf = timeframeSelect.value;
-            showStatusMessage(`Loading chart for ${currentChartData.instrument.displayName} (${tf})...`);
+            const stP = stPeriodInput.value;
+            const stM = stMultiplierInput.value;
+            showStatusMessage(`Loading chart for ${currentChartData.instrument.displayName} (${tf}), ST(${stP},${stM})...`);
             
             try {
-                const url = `${API_BASE_URL}/api/historical-data?scrip=${encodeURIComponent(currentChartData.instrument.displayName)}&timeframe=${encodeURIComponent(tf)}&exchangeSegment=${encodeURIComponent(currentChartData.instrument.exchangeSegment)}&exchangeInstrumentID=${encodeURIComponent(currentChartData.instrument.exchangeInstrumentID)}`;
+                const url = `${API_BASE_URL}/api/strategy-data?scrip=${encodeURIComponent(currentChartData.instrument.displayName)}&timeframe=${encodeURIComponent(tf)}&exchangeSegment=${encodeURIComponent(currentChartData.instrument.exchangeSegment)}&exchangeInstrumentID=${encodeURIComponent(currentChartData.instrument.exchangeInstrumentID)}&strategy=supertrend&st_period=${stP}&st_multiplier=${stM}`;
+                
                 const response = await fetch(url);
                 if (!response.ok) { 
-                    const errData = await response.json().catch(() => ({ description: "Unknown server error" }));
-                    throw new Error(`${response.status} ${response.statusText} - ${errData.description || 'Failed to fetch historical data'}`); 
+                    const errData = await response.json().catch(() => ({ description: "Unknown server error while fetching strategy data." }));
+                    throw new Error(`${response.status} ${response.statusText} - ${errData.description || 'Failed to fetch strategy data'}`); 
                 }
-                const data = await response.json();
-                await createOrUpdateChart(data); // This also sets currentChartData.lastCandle
+                const combinedData = await response.json();
 
-                // Subscribe to real-time feed for the new instrument
-                if (currentChartData.socket && currentChartData.instrument) {
+                if (!chart || candlestickSeries === null) { 
+                    await initializeNewChart();
+                } else { 
+                     Object.keys(currentChartData.priceLines).forEach(lineId => removePriceLine(lineId));
+                }
+                await createOrUpdateChart(combinedData.ohlc || [], combinedData.strategy || null);
+
+                if (currentChartData.socket && currentChartData.socket.connected && currentChartData.instrument && !currentChartData.isSubscribed) {
+                    console.log("Attempting to subscribe to new/current instrument after load:", currentChartData.instrument);
                     subscribeToInstrumentFeed(currentChartData.instrument);
+                } else if (currentChartData.socket && !currentChartData.socket.connected) {
+                    console.warn("Socket not connected, cannot subscribe after load.");
                 }
 
             } catch (error) { 
-                console.error('[loadChartDataAndUpdateState] Error:', error); 
-                showStatusMessage('Error loading chart data: ' + error.message, true); 
-                currentChartData.instrument = null; // Clear on error
-                await createOrUpdateChart([]); 
+                console.error('[loadChartDataAndUpdateState with Strategy] Error:', error); 
+                showStatusMessage('Error loading chart/strategy data: ' + error.message, true); 
+                if (!chart) await initializeNewChart();
+                await createOrUpdateChart([], null); 
             }
         }
 
         // --- WebSocket Functions ---
         function setupWebSocket() {
-            if (currentChartData.socket) { // Close existing if any
+            if (currentChartData.socket && currentChartData.socket.connected) { 
                 currentChartData.socket.disconnect();
             }
-            currentChartData.socket = io(); 
+            currentChartData.socket = io({
+                reconnectionAttempts: 5, 
+                reconnectionDelay: 3000,
+                transports: ['websocket'] 
+            }); 
             const socket = currentChartData.socket;
 
             socket.on('connect', () => {
@@ -305,116 +436,127 @@
 
             socket.on('connect_error', (error) => {
                 console.error('WebSocket: Connection Error:', error);
-                showStatusMessage("WebSocket connection error.", true);
+                showStatusMessage(`WebSocket connection error: ${error.message || error}`, true);
             });
 
             socket.on('server_message', (data) => console.log('WebSocket (Server):', data.data));
-            socket.on('auth_error', (data) => { console.error('WebSocket Auth Error:', data.message); showStatusMessage("WebSocket Auth Error: " + data.message, true);});
+            socket.on('auth_error', (data) => { 
+                console.error('WebSocket Auth Error:', data.message); 
+                showStatusMessage("WebSocket Auth Error: " + data.message + " Please re-login to broker if issue persists.", true);
+            });
+
             socket.on('subscription_ack', (data) => {
                 console.log('WebSocket: Subscription Acknowledged:', data);
-                showStatusMessage(`Subscribed to ${data.instrument.displayName} in room ${data.room}.`, false, true);
-                currentChartData.isSubscribed = true;
-                currentChartData.currentRoom = data.room;
-            });
-            socket.on('subscription_error', (data) => { console.error('WebSocket: Subscription Error:', data); showStatusMessage("Subscription Error: " + data.error, true); currentChartData.isSubscribed = false;});
-            socket.on('unsubscription_ack', (data) => { console.log('WebSocket: Unsubscription Acknowledged:', data); showStatusMessage(`Unsubscribed from ${data.instrument.displayName}.`, false); currentChartData.isSubscribed = false; currentChartData.currentRoom = null;});
-
-            socket.on('market_data_md_1501_full', (tickData) => { // LTP, Touchline
-                // For debugging, you can log the incoming tickData:
-                // console.log('market_data_md_1501_full:', tickData);
-
-                if (!candlestickSeries || !volumeSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
-                
-                const price = parseFloat(tickData.LastTradedPrice);
-                const timeSeconds = parseInt(tickData.LastTradeTime); // XTS usually provides epoch time
-                
-                // IMPORTANT: Verify 'LastTradedQuantity' is the correct field name from XTS
-                const volume = parseInt(tickData.LastTradedQuantity) || 0; // Corrected typo: LastTradedQunatity -> LastTradedQuantity
-
-                if (isNaN(price) || isNaN(timeSeconds)) {
-                    // console.warn("Invalid price or time in tickData:", tickData); // Optional: for debugging
-                    return;
+                if (currentChartData.instrument && 
+                    data.instrument.exchangeInstrumentID == currentChartData.instrument.exchangeInstrumentID &&
+                    data.instrument.exchangeSegment == currentChartData.instrument.exchangeSegment) {
+                    showStatusMessage(`Subscribed to ${data.instrument.displayName}.`, false, true);
+                    currentChartData.isSubscribed = true;
+                    currentChartData.currentRoom = data.room; 
+                } else {
+                    console.warn("Subscription ACK for an unexpected or non-current instrument:", data.instrument, "Current:", currentChartData.instrument);
                 }
-                updateChartCandleWithTick(timeSeconds, price, volume);
+            });
+            socket.on('subscription_error', (data) => { 
+                console.error('WebSocket: Subscription Error:', data); 
+                showStatusMessage("Subscription Error: " + (data.error || "Unknown reason"), true); 
+            });
+            socket.on('unsubscription_ack', (data) => { 
+                console.log('WebSocket: Unsubscription Acknowledged:', data); 
+                if (currentChartData.instrument && 
+                    data.instrument.exchangeInstrumentID == currentChartData.instrument.exchangeInstrumentID &&
+                    data.instrument.exchangeSegment == currentChartData.instrument.exchangeSegment) { 
+                    showStatusMessage(`Unsubscribed from ${data.instrument.displayName}.`, false); 
+                    currentChartData.isSubscribed = false;
+                    currentChartData.currentRoom = null;
+                }
             });
 
-            socket.on('market_data_md_1502_full', (quoteData) => { // Quote data
-                 if (!candlestickSeries || !volumeSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
-                 // You might want to update Day Open, High, Low, Close if displayed elsewhere,
-                 // or use quoteData.ClosePrice for latest price if LTP is not frequent.
-                 // For candlestick updates from ticks, 1501 is usually primary.
-                 // console.log("Quote Data (1502):", quoteData);
-                 // Potentially update if it has a more recent timestamp than last 1501 tick
-                 const price = parseFloat(quoteData.ClosePrice); // Or TouchlineClosePrice etc.
-                 const timeSeconds = parseInt(quoteData.MessageCodeTimestamp); // Check actual timestamp field for quote
-                 if (!isNaN(price) && !isNaN(timeSeconds)) {
-                    // updateChartCandleWithTick(timeSeconds, price, 0); // Volume might not be applicable here
-                 }
-            });
-            
-            socket.on('market_data_md_1512_full', (candleData) => { // Example for direct candle data
-                // For debugging, you can log the incoming candleData:
-                // console.log('market_data_md_1512_full:', candleData);
-
+            socket.on('market_data_md_1501_full', (tickData) => { 
                 if (!candlestickSeries || !volumeSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
-                
-                const newCandle = {
-                    time: parseInt(candleData.Timestamp), // Verify this is UTC epoch seconds
-                    open: parseFloat(candleData.Open),
-                    high: parseFloat(candleData.High),
-                    low: parseFloat(candleData.Low),
-                    close: parseFloat(candleData.Close),
-                    volume: parseInt(candleData.Volume) || 0
-                };
-
-                if (Object.values(newCandle).some(v => isNaN(v))) { 
-                    // console.warn("Invalid 1512 candle data:", candleData); // Optional: for debugging
+                if (tickData.ExchangeInstrumentID != currentChartData.instrument.exchangeInstrumentID || 
+                    (SEGMENT_NAME_TO_CODE_MAP[currentChartData.instrument.exchangeSegment] != tickData.ExchangeSegment && 
+                     currentChartData.instrument.exchangeSegment != tickData.ExchangeSegment) 
+                    ) {
                     return; 
                 }
                 
-                const expectedInterval = currentChartData.timeframeMinutes * 60;
-                if (newCandle.time % expectedInterval === 0) { // Ensure candle aligns with current chart timeframe
+                const price = parseFloat(tickData.LastTradedPrice);
+                const timeSeconds = parseInt(tickData.LastTradeTime); 
+                const volume = parseInt(tickData.LastTradedQuantity) || 0; 
+
+                if (isNaN(price) || isNaN(timeSeconds) || timeSeconds <= 0) { return; }
+                updateChartCandleWithTick(timeSeconds, price, volume);
+            });
+            
+            socket.on('market_data_md_1512_full', (candleData) => {
+                if (!candlestickSeries || !volumeSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
+                if (candleData.ExchangeInstrumentID != currentChartData.instrument.exchangeInstrumentID || 
+                     (SEGMENT_NAME_TO_CODE_MAP[currentChartData.instrument.exchangeSegment] != candleData.ExchangeSegment &&
+                      currentChartData.instrument.exchangeSegment != candleData.ExchangeSegment)
+                    ) {
+                    return; 
+                }
+                const expectedIntervalSeconds = currentChartData.timeframeMinutes * 60;
+                const candleTime = parseInt(candleData.Timestamp); 
+
+                if (isNaN(candleTime) || candleTime <= 0 ) return;
+
+                if (candleTime % expectedIntervalSeconds === 0) {
+                     const newCandle = {
+                        time: candleTime, 
+                        open: parseFloat(candleData.Open), high: parseFloat(candleData.High),
+                        low: parseFloat(candleData.Low), close: parseFloat(candleData.Close),
+                        volume: parseInt(candleData.Volume) || 0
+                    };
+                    if (Object.values(newCandle).some(v => isNaN(v))) { return; }
+                    
                     candlestickSeries.update(newCandle);
-                    volumeSeries.update({ // Added volume series update
-                        time: newCandle.time,
-                        value: newCandle.volume,
+                    volumeSeries.update({
+                        time: newCandle.time, value: newCandle.volume,
                         color: newCandle.close >= newCandle.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)'
                     });
-                    currentChartData.lastCandle = { ...newCandle }; // Update our tracked candle
-                } else {
-                    // console.warn("Received 1512 candle with misaligned timestamp for current chart timeframe:", newCandle);
+                    currentChartData.lastCandle = { ...newCandle };
                 }
             });
         }
 
         function subscribeToInstrumentFeed(instrument) {
-            if (!currentChartData.socket || !instrument || currentChartData.isSubscribed) {
-                if(currentChartData.isSubscribed) console.log("Already subscribed to an instrument.");
+            if (!currentChartData.socket || !currentChartData.socket.connected || !instrument ) {
+                console.warn("Cannot subscribe: Socket not connected or instrument missing.", instrument, currentChartData.socket?.connected);
+                showStatusMessage("Cannot subscribe: WebSocket not ready.", true);
                 return;
             }
+            if (currentChartData.isSubscribed && 
+                currentChartData.instrument?.exchangeInstrumentID === instrument.exchangeInstrumentID &&
+                currentChartData.instrument?.exchangeSegment === instrument.exchangeSegment) {
+                console.log("Already subscribed to this instrument:", instrument.displayName);
+                return;
+            }
+
             console.log(`Attempting to subscribe to: ${instrument.displayName} (${instrument.exchangeSegment}:${instrument.exchangeInstrumentID})`);
             currentChartData.socket.emit('subscribe_instrument', {
                 exchangeSegment: instrument.exchangeSegment,
                 exchangeInstrumentID: instrument.exchangeInstrumentID,
-                displayName: instrument.displayName // Pass displayName for ack message
+                displayName: instrument.displayName 
             });
         }
 
         function unsubscribeFromInstrumentFeed(instrument) {
-            if (!currentChartData.socket || !instrument || !currentChartData.isSubscribed) return;
+            if (!currentChartData.socket || !currentChartData.socket.connected || !instrument ) {
+                console.warn("Cannot unsubscribe: Socket not connected or instrument missing.");
+                return;
+            }
             console.log(`Attempting to unsubscribe from: ${instrument.displayName}`);
             currentChartData.socket.emit('unsubscribe_instrument', {
                 exchangeSegment: instrument.exchangeSegment,
                 exchangeInstrumentID: instrument.exchangeInstrumentID,
-                displayName: instrument.displayName // Pass displayName for ack message
+                displayName: instrument.displayName
             });
-            // isSubscribed and currentRoom will be updated on 'unsubscription_ack'
         }
-
-        // *** UPDATED FUNCTION ***
+        
         function updateChartCandleWithTick(timeSeconds, price, tickVolume) {
-            if (!candlestickSeries || !volumeSeries || !currentChartData.instrument) {
-                // console.warn("Skipping tick update: series or instrument not ready."); // Optional: for debugging
+            if (!candlestickSeries || !volumeSeries || !currentChartData.instrument || !currentChartData.lastCandle) {
                 return;
             }
 
@@ -422,57 +564,71 @@
             const candleTimestampForTick = Math.floor(timeSeconds / candleIntervalSeconds) * candleIntervalSeconds;
 
             let lastKnownCandle = currentChartData.lastCandle;
+            let isNewCandle = false;
 
-            if (lastKnownCandle && lastKnownCandle.time === candleTimestampForTick) {
-                // Tick belongs to the currently forming candle
+            if (lastKnownCandle.time === candleTimestampForTick) { 
                 lastKnownCandle.high = Math.max(lastKnownCandle.high, price);
                 lastKnownCandle.low = Math.min(lastKnownCandle.low, price);
                 lastKnownCandle.close = price;
-                lastKnownCandle.volume = (lastKnownCandle.volume || 0) + (tickVolume || 0);
-
+                lastKnownCandle.volume = (lastKnownCandle.volume || 0) + (tickVolume || 0); 
                 candlestickSeries.update(lastKnownCandle);
-                volumeSeries.update({
-                    time: lastKnownCandle.time,
-                    value: lastKnownCandle.volume,
-                    color: lastKnownCandle.close >= lastKnownCandle.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)'
-                });
-            } else {
-                // Tick belongs to a new candle
+            } else if (candleTimestampForTick > lastKnownCandle.time) { 
+                isNewCandle = true;
                 const newCandle = {
-                    time: candleTimestampForTick,
-                    open: price, // Open of the new candle is the price of its first tick
-                    high: price,
-                    low: price,
-                    close: price,
+                    time: candleTimestampForTick, open: price, high: price, low: price, close: price,
                     volume: tickVolume || 0
                 };
-
                 candlestickSeries.update(newCandle);
-                volumeSeries.update({
-                    time: newCandle.time,
-                    value: newCandle.volume,
-                    // Color for a new volume bar; follows open/close logic
-                    color: newCandle.close >= newCandle.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)'
-                });
-                currentChartData.lastCandle = newCandle; // Update the last known candle state
+                currentChartData.lastCandle = newCandle; 
+            } else { 
+                return;
+            }
+            
+            volumeSeries.update({
+                time: currentChartData.lastCandle.time, 
+                value: currentChartData.lastCandle.volume,
+                color: currentChartData.lastCandle.close >= currentChartData.lastCandle.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)'
+            });
+
+            if (isNewCandle) {
+                console.log("New candle formed by tick. Time:", new Date(currentChartData.lastCandle.time * 1000).toLocaleTimeString());
             }
         }
         
         function updateCurrentTimeframeFromSelector() {
             const tfValue = timeframeSelect.value;
             const map = {"1D":1440, "1H":60, "15min":15, "5min":5, "1min":1};
-            currentChartData.timeframeMinutes = map[tfValue] || 1;
+            currentChartData.timeframeMinutes = map[tfValue] || 1; 
             console.log("Chart timeframe state updated to: " + currentChartData.timeframeMinutes + " minutes.");
         }
 
+        function addPriceLine(id, price, color = 'grey', lineStyle = LightweightCharts.LineStyle.Solid, title = '') {
+            if (!candlestickSeries || !chart) return null;
+            removePriceLine(id); 
+
+            const newLine = candlestickSeries.createPriceLine({
+                price: parseFloat(price), color: color, lineWidth: 2,
+                lineStyle: lineStyle, axisLabelVisible: true, title: title,
+            });
+            currentChartData.priceLines[id] = newLine;
+            return newLine;
+        }
+
+        function removePriceLine(id) {
+            if (currentChartData.priceLines[id] && candlestickSeries) {
+                try {
+                    candlestickSeries.removePriceLine(currentChartData.priceLines[id]);
+                } catch (e) { console.warn("Error removing price line:", id, e); }
+                delete currentChartData.priceLines[id];
+            }
+        }
 
         // --- Event Listeners ---
         if(logoutBtnElement) {
-            logoutBtnElement.addEventListener('click', async (event) => {
+            logoutBtnElement.addEventListener('click', (event) => { 
                 event.preventDefault(); 
-                try {
-                     document.getElementById('logout-form').submit(); // Submit the form for POST logout
-                } catch (error) { console.error("Logout error:", error); showStatusMessage("Logout request failed.", true); }
+                try { document.getElementById('logout-form').submit(); } 
+                catch (error) { console.error("Logout error:", error); showStatusMessage("Logout request failed.", true); }
             });
         }
         
@@ -481,12 +637,24 @@
         if(timeframeSelect) {
             timeframeSelect.addEventListener('change', () => {
                 updateCurrentTimeframeFromSelector();
-                // When timeframe changes, reload historical data and resubscribe for that timeframe
-                if (currentChartData.instrument) { // Only if an instrument is already selected
-                    loadChartDataAndUpdateState();
+                if (currentChartData.instrument) { loadChartDataAndUpdateState(); }
+            });
+        }
+        if(stPeriodInput) stPeriodInput.addEventListener('change', () => { if (currentChartData.instrument) loadChartDataAndUpdateState(); });
+        if(stMultiplierInput) stMultiplierInput.addEventListener('change', () => { if (currentChartData.instrument) loadChartDataAndUpdateState(); });
+        
+        // Added event listener for the Supertrend checkbox
+        if (showSupertrendCheckbox) {
+            showSupertrendCheckbox.addEventListener('change', () => {
+                if (currentChartData.instrument) { // Only reload if an instrument is loaded
+                    loadChartDataAndUpdateState(); // Reload chart to apply visibility change
+                } else if (supertrendLineSeries) { // If no instrument but series exists, just toggle visibility
+                    supertrendLineSeries.applyOptions({ visible: showSupertrendCheckbox.checked });
+                     if (!showSupertrendCheckbox.checked) supertrendLineSeries.setData([]);
                 }
             });
         }
+
 
         if(downloadMasterBtn) { 
             downloadMasterBtn.addEventListener('click', async () => {
@@ -495,43 +663,52 @@
                     const response = await fetch(`${API_BASE_URL}/api/download-master-contracts`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ segments: ["NSECM", "NSEFO", "MCXFO", "NSECUR"] }) // Specify segments
+                        body: JSON.stringify({ segments: ["NSECM", "NSEFO", "MCXFO", "NSECUR", "NSEIDX"] }) 
                     });
-                    const result = await response.json();
-                    if (response.ok) {
-                        let successMessages = [];
-                        let errorMessages = [];
+                    const result = await response.json(); 
+                    let successMessages = [], errorMessages = [];
+                    if (response.ok) { 
                         for (const seg in result) {
-                            if (result[seg].type === 'success') successMessages.push(result[seg].description);
-                            else errorMessages.push(`${seg}: ${result[seg].description}`);
+                            if (result[seg].type === 'success') successMessages.push(seg + ": " +result[seg].description);
+                            else errorMessages.push(`${seg}: ${result[seg].description} (Code: ${result[seg].code || 'N/A'})`);
                         }
-                        let finalMessage = "";
-                        if(successMessages.length > 0) finalMessage += "Success: " + successMessages.join(' ');
-                        if(errorMessages.length > 0) finalMessage += (finalMessage ? " " : "") + "Errors: " + errorMessages.join('; ');
-                        showStatusMessage(finalMessage || "Master contract download process finished.", errorMessages.length > 0, successMessages.length > 0 && errorMessages.length === 0);
-                        if (successMessages.length > 0) await populateScrips(); // Refresh scrip list
-                    } else {
-                        throw new Error(result.error || result.description || "Failed to download master contracts");
+                    } else { 
+                         errorMessages.push(result.error || result.description || `Failed with status ${response.status}`);
+                    }
+
+                    let finalMessage = "";
+                    if(successMessages.length > 0) finalMessage += "Success: " + successMessages.join('; ');
+                    if(errorMessages.length > 0) finalMessage += (finalMessage ? " | " : "") + "Errors: " + errorMessages.join('; ');
+                    
+                    showStatusMessage(finalMessage || "Master contract download process finished.", errorMessages.length > 0, successMessages.length > 0 && errorMessages.length === 0);
+                    if (successMessages.length > 0 || (response.ok && errorMessages.length > 0)) { 
+                        await populateScrips(); 
                     }
                 } catch (error) {
                     console.error("Error downloading master contracts:", error);
-                    showStatusMessage("Error downloading master contracts: " + error.message, true);
+                    showStatusMessage("Client-side error downloading master contracts: " + error.message, true);
                 }
             });
         }
         
-        window.addEventListener('resize', () => { if (chart && chartContainer) { chart.applyOptions({ width: chartContainer.clientWidth, height: chartContainer.clientHeight }); } });
+        window.addEventListener('resize', () => { 
+            if (chart && chartContainer) { 
+                try {
+                    chart.applyOptions({ width: chartContainer.clientWidth, height: chartContainer.clientHeight }); 
+                } catch (e) { console.warn("Error applying resize options:", e)}
+            }
+        });
 
         // --- Initialization ---
         document.addEventListener('DOMContentLoaded', async () => {
             console.log("DOM fully loaded and parsed.");
             if(logoutBtnElement) logoutBtnElement.classList.remove('hidden');
             
-            updateCurrentTimeframeFromSelector(); // Initialize timeframe state
-            setupWebSocket(); // Initialize WebSocket connection
+            updateCurrentTimeframeFromSelector(); 
+            setupWebSocket(); 
             
             showStatusMessage("Loading application data...", false);
-            await populateScrips(); // This will also load chart for default/first scrip
+            await populateScrips(); 
         });
     </script>
 </body>
