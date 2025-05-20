@@ -6,8 +6,8 @@
     <title>Trading Chart - {{ username if username else 'Platform' }}</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lightweight-charts@3.8.0/dist/lightweight-charts.standalone.production.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script>
     <style>
-        /* ... (your existing styles - ensure .hidden { display: none !important; } is present) ... */
         body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; height: 100vh; margin: 0; display: flex; flex-direction: column; }
         .page-content-wrapper { display: flex; flex-direction: column; flex-grow: 1; overflow-y: auto; } 
         #chart-container { width: 100%; flex-grow: 1; min-height: 350px; background-color: white; }
@@ -52,8 +52,8 @@
     </div>
 
     <script>
-        // --- DOM Element References (Ensure these are at the very top) ---
-        const logoutBtnElement = document.getElementById('logout-btn'); // Changed variable name for clarity
+        // --- DOM Element References ---
+        const logoutBtnElement = document.getElementById('logout-btn');
         const scripSelect = document.getElementById('scrip-select');
         const scripSearchInput = document.getElementById('scrip-search');
         const timeframeSelect = document.getElementById('timeframe-select');
@@ -63,16 +63,30 @@
         const downloadMasterBtn = document.getElementById('download-master-btn');
 
         // --- State Variables ---
-        let chart = null, candleSeries = null, volumeSeries = null;
-        let managedPriceLines = [], currentScripDetails = null;
+        let chart = null, candlestickSeries = null, volumeSeries = null;
         let allScripsCache = [];
         let searchDebounceTimer = null;
 
+        let currentChartData = {
+            instrument: null, // Stores { displayName, exchangeInstrumentID, exchangeSegment }
+            timeframeMinutes: 5, // Default, will be updated
+            lastCandle: null, // Stores latest candle object { time, open, high, low, close, volume }
+            socket: null,
+            isSubscribed: false, // Track current subscription status
+            currentRoom: null    // Store the room joined
+        };
+        
         // --- Constants ---
         const API_BASE_URL = ''; 
         const INITIAL_VISIBLE_CANDLES = 100;
         const MAX_SCRIPS_IN_DROPDOWN = 200; 
         const SEARCH_DEBOUNCE_DELAY = 300;
+         // This map needs to align with backend's XTS_SEGMENT_CODE_MAP keys if used for room construction logic frontend-side
+        const SEGMENT_NAME_TO_CODE_MAP = {
+            "NSECM": 1, "NSEFO": 2, "NSECUR": 3, "MCXFO": 4, "NCDEXFO": 5,
+            "BSECM": 13, "BSEFO": 14, "BSECDS": 15, "NSEIDX": 20 
+        };
+
 
         // --- Utility Functions ---
         function showStatusMessage(message, isError = false, isSuccess = false) {
@@ -85,13 +99,13 @@
 
         // --- Charting Functions ---
         function initializeNewChart() {
-            // ... (Keep your working initializeNewChart function here from previous version)
             return new Promise((resolve, reject) => {
                 if (!chartContainer) { console.error("Chart container missing!"); reject(new Error("Chart container not found")); return; }
                 if (typeof LightweightCharts === 'undefined') { console.error("LightweightCharts lib missing!"); reject(new Error("Charting library not loaded")); return; }
-                chartContainer.innerHTML = '';
-                requestAnimationFrame(() => {
+                chartContainer.innerHTML = ''; // Clear previous chart
+                requestAnimationFrame(() => { // Ensure DOM is ready for new chart
                     try {
+                        const watermarkText = currentChartData.instrument ? currentChartData.instrument.displayName : "Chart";
                         const chartOptions = {
                             width: chartContainer.clientWidth, height: chartContainer.clientHeight,
                             layout: { background: { type: 'solid', color: '#ffffff' }, textColor: 'rgba(33, 56, 77, 1)'},
@@ -99,58 +113,58 @@
                             crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
                             rightPriceScale: { borderColor: 'rgba(197, 203, 206, 0.8)', scaleMargins: { top: 0.2, bottom: 0.15 }},
                             timeScale: { borderColor: 'rgba(197, 203, 206, 0.8)', timeVisible: true, secondsVisible: false, fixLeftEdge: true, fixRightEdge: true},
-                            watermark: { color: 'rgba(150, 150, 150, 0.1)', visible: true, text: currentScripDetails?.displayName || "Chart", fontSize: 48, horzAlign: 'center', vertAlign: 'center'},
+                            watermark: { color: 'rgba(150, 150, 150, 0.1)', visible: true, text: watermarkText, fontSize: 48, horzAlign: 'center', vertAlign: 'center'},
                         };
                         chart = LightweightCharts.createChart(chartContainer, chartOptions);
-                        candleSeries = chart.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350', borderDownColor: '#ef5350', borderUpColor: '#26a69a', wickDownColor: '#ef5350', wickUpColor: '#26a69a' });
+                        candlestickSeries = chart.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350', borderDownColor: '#ef5350', borderUpColor: '#26a69a', wickDownColor: '#ef5350', wickUpColor: '#26a69a' });
                         volumeSeries = chart.addHistogramSeries({ color: '#A9A9A9', priceFormat: { type: 'volume' }, priceScaleId: 'volume_scale', lastValueVisible: true });
                         if (chart.priceScale('volume_scale') && typeof chart.priceScale('volume_scale').applyOptions === 'function') {
                            chart.priceScale('volume_scale').applyOptions({ scaleMargins: { top: 0.7, bottom: 0 } });
                         }
                         resolve();
-                    } catch (e) { reject(e); }
+                    } catch (e) { console.error("Error initializing chart:", e); reject(e); }
                 });
             });
         }
 
         async function createOrUpdateChart(backendChartData) {
-            // ... (Keep your simplified createOrUpdateChart function here from previous version)
-             console.log(`%c[ChartPage] createOrUpdateChart called. Received ${backendChartData ? backendChartData.length : 0} pre-validated points.`, "color: blue;");
-            if (chart) { try { chart.remove(); } catch (e) {} chart = null; candleSeries = null; volumeSeries = null; }
-
+            if (chart) { try { chart.remove(); } catch (e) {} chart = null; candlestickSeries = null; volumeSeries = null; }
             try {
                 await initializeNewChart();
-                if (!chart || !candleSeries || !volumeSeries) { throw new Error("Chart/series not initialized."); }
+                if (!chart || !candlestickSeries || !volumeSeries) { throw new Error("Chart/series not initialized after attempt."); }
 
                 let finalOhlcData = [], finalVolumeData = [];
+                currentChartData.lastCandle = null; // Reset last candle on new historical load
+
                 if (backendChartData && Array.isArray(backendChartData) && backendChartData.length > 0) {
                     for (const d of backendChartData) {
                         if (d && d.time != null && d.open != null && d.high != null && d.low != null && d.close != null && d.volume != null) {
-                            finalOhlcData.push({ time: Number(d.time), open: Number(d.open), high: Number(d.high), low: Number(d.low), close: Number(d.close) });
+                            const candle = { time: Number(d.time), open: Number(d.open), high: Number(d.high), low: Number(d.low), close: Number(d.close), volume: Number(d.volume) };
+                            finalOhlcData.push(candle); // For candlestick series, volume is separate
                             finalVolumeData.push({ time: Number(d.time), value: Number(d.volume), color: Number(d.close) >= Number(d.open) ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)' });
-                        } else { console.warn(`[ChartPage] Skipping malformed data point from backend: ${JSON.stringify(d)}`); }
+                        }
+                    }
+                    if (finalOhlcData.length > 0) {
+                        currentChartData.lastCandle = { ...finalOhlcData[finalOhlcData.length - 1] }; // Set last candle from historical data
                     }
                 }
                 
+                candlestickSeries.setData(finalOhlcData);
+                volumeSeries.setData(finalVolumeData);
+
                 if (finalOhlcData.length > 0) {
-                    candleSeries.setData(finalOhlcData);
-                    if (volumeSeries) volumeSeries.setData(finalVolumeData);
                     showStatusMessage(`Chart rendered with ${finalOhlcData.length} candles.`, false, true);
                 } else {
-                     if(candleSeries) candleSeries.setData([]); if(volumeSeries) volumeSeries.setData([]);
-                     showStatusMessage(backendChartData && backendChartData.length > 0 ? "No valid data after frontend mapping." : "No data received for chart.", true);
+                     showStatusMessage(backendChartData && backendChartData.length > 0 ? "No valid data after mapping." : "No data received for chart.", true);
                 }
                 const dataLength = finalOhlcData.length;
                 if (dataLength > 0 && chart.timeScale) { chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, dataLength - INITIAL_VISIBLE_CANDLES), to: dataLength -1 });
                 } else if (chart.timeScale) { chart.timeScale().fitContent(); }
-            } catch (error) { console.error("Error in createOrUpdateChart:", error); showStatusMessage("Error creating/updating chart.", true); }
-        }
 
-        function clearAllManagedPriceLines() { /* ... */ }
-        async function loadAndDisplayStrategyMarkers(scrip, timeframe) { /* ... */ }
+            } catch (error) { console.error("Error in createOrUpdateChart:", error); showStatusMessage("Error creating/updating chart: " + error.message, true); }
+        }
         
         function filterAndDisplayScrips(searchTerm = "") {
-            // ... (Keep your working filterAndDisplayScrips function here)
             const lowerSearchTerm = searchTerm.toLowerCase();
             if (!scripSelect) { return; }
             scripSelect.innerHTML = ''; let optionsAdded = 0; const fragment = document.createDocumentFragment();
@@ -176,85 +190,311 @@
                 }
             }
             scripSelect.appendChild(fragment);
-            if (optionsAdded === 0) { /* ... no results option ... */ }
+            if (optionsAdded === 0 && searchTerm !== "") { 
+                const o = document.createElement('option'); o.disabled = true; o.textContent = "No matching scrips found."; fragment.appendChild(o);
+            }
         }
 
         async function populateScrips() {
-            // ... (Keep your working populateScrips function here, ensure API call is to /api/scrips)
-            console.log("%c[populateScrips] Called.", "color: blue; font-weight: bold;");
             showStatusMessage("Loading scrips...", false, false);
             try {
-                const response = await fetch(`${API_BASE_URL}/api/scrips`); // Ensure /api prefix
-                if (!response.ok) { allScripsCache = []; filterAndDisplayScrips(); throw new Error(`HTTP error ${response.status}`); }
+                const response = await fetch(`${API_BASE_URL}/api/scrips`);
+                if (!response.ok) { throw new Error(`HTTP error ${response.status}`); }
                 allScripsCache = await response.json();
-                console.log(`[populateScrips] Scrips cached: ${allScripsCache.length}`);
                 filterAndDisplayScrips(); 
-                let defaultSelected = false; let preferred = ["RELIANCE", "NIFTY 50"];
-                if (scripSelect && scripSelect.options.length > 0) { /* ... default selection logic ... */ }
+                if (scripSelect && scripSelect.options.length > 0) {
+                    // Try to select a default like RELIANCE or NIFTY 50 if available
+                    let defaultSelected = false;
+                    const preferredDefaults = ["RELIANCE", "NIFTY 50"];
+                    for (const pref of preferredDefaults) {
+                        for (let i=0; i<scripSelect.options.length; i++) {
+                            if (scripSelect.options[i].value.toUpperCase() === pref.toUpperCase()) {
+                                scripSelect.selectedIndex = i; defaultSelected = true; break;
+                            }
+                        }
+                        if (defaultSelected) break;
+                    }
+                    if (!defaultSelected) scripSelect.selectedIndex = 0; // Fallback to first if no preferred found
+                }
+
                 if (scripSelect && scripSelect.options.length > 0 && scripSelect.selectedIndex !== -1 && scripSelect.options[scripSelect.selectedIndex]?.dataset.instrumentId) {
-                    await loadChartData();
-                } else { showStatusMessage(allScripsCache.length > 0 ? "Scrips loaded." : "No scrips.", false); }
-            } catch (error) { console.error('[populateScrips] Error:', error); showStatusMessage("Error scrips: " + error.message, true); allScripsCache = []; filterAndDisplayScrips(); }
+                    await loadChartDataAndUpdateState(); // This will also trigger subscription
+                } else { 
+                    showStatusMessage(allScripsCache.length > 0 ? "Scrips loaded. Select one to load chart." : "No scrips available.", false, !allScripsCache.length > 0); 
+                    await createOrUpdateChart([]); // Show empty chart
+                }
+            } catch (error) { console.error('[populateScrips] Error:', error); showStatusMessage("Error loading scrips: " + error.message, true); allScripsCache = []; filterAndDisplayScrips(); await createOrUpdateChart([]); }
         }
         
         if(scripSearchInput) { scripSearchInput.addEventListener('input', () => { clearTimeout(searchDebounceTimer); searchDebounceTimer = setTimeout(() => { filterAndDisplayScrips(scripSearchInput.value); }, SEARCH_DEBOUNCE_DELAY); }); }
 
-        async function loadChartData() {
-            // ... (Keep your working loadChartData function here, ensure API call is to /api/historical-data)
-            // ... Ensure it uses the renamed logoutBtnElement if needed within this function, or rely on global logoutBtnElement
-            console.log("%c[loadChartData] Initiated.", "color: #28a745; font-weight: bold;");
+        async function loadChartDataAndUpdateState() {
+            console.log("%c[loadChartDataAndUpdateState] Initiated.", "color: #28a745; font-weight: bold;");
             const selectedIndex = scripSelect ? scripSelect.selectedIndex : -1;
             const selectedOption = scripSelect && selectedIndex !== -1 ? scripSelect.options[selectedIndex] : null;
-            if (!selectedOption || !selectedOption.dataset || !selectedOption.dataset.instrumentId || !selectedOption.dataset.segment) {
-                showStatusMessage("No valid scrip selected.", true); await createOrUpdateChart([]); return;
+            
+            if (currentChartData.isSubscribed && currentChartData.instrument) {
+                unsubscribeFromInstrumentFeed(currentChartData.instrument); // Unsubscribe from previous
+                currentChartData.isSubscribed = false;
+                currentChartData.currentRoom = null;
             }
-            currentScripDetails = { displayName: selectedOption.value, exchangeInstrumentID: selectedOption.dataset.instrumentId, exchangeSegment: selectedOption.dataset.segment };
+
+            if (!selectedOption || !selectedOption.dataset || !selectedOption.dataset.instrumentId || !selectedOption.dataset.segment) {
+                showStatusMessage("No valid scrip selected.", true); 
+                currentChartData.instrument = null; // Clear current instrument
+                await createOrUpdateChart([]); return;
+            }
+
+            // Update current instrument details
+            currentChartData.instrument = { 
+                displayName: selectedOption.value, 
+                exchangeInstrumentID: parseInt(selectedOption.dataset.instrumentId), 
+                exchangeSegment: selectedOption.dataset.segment
+            };
+            updateCurrentTimeframeFromSelector(); // Update timeframe state
+
             const tf = timeframeSelect.value;
-            showStatusMessage(`Loading chart for ${currentScripDetails.displayName} (${tf})...`);
+            showStatusMessage(`Loading chart for ${currentChartData.instrument.displayName} (${tf})...`);
+            
             try {
-                const url = `${API_BASE_URL}/api/historical-data?scrip=${encodeURIComponent(currentScripDetails.displayName)}&timeframe=${encodeURIComponent(tf)}&exchangeSegment=${encodeURIComponent(currentScripDetails.exchangeSegment)}&exchangeInstrumentID=${encodeURIComponent(currentScripDetails.exchangeInstrumentID)}`;
+                const url = `${API_BASE_URL}/api/historical-data?scrip=${encodeURIComponent(currentChartData.instrument.displayName)}&timeframe=${encodeURIComponent(tf)}&exchangeSegment=${encodeURIComponent(currentChartData.instrument.exchangeSegment)}&exchangeInstrumentID=${encodeURIComponent(currentChartData.instrument.exchangeInstrumentID)}`;
                 const response = await fetch(url);
-                if (!response.ok) { const errTxt = await response.text(); throw new Error(`${response.status} ${response.statusText} - ${errTxt}`); }
+                if (!response.ok) { 
+                    const errData = await response.json().catch(() => ({ description: "Unknown server error" }));
+                    throw new Error(`${response.status} ${response.statusText} - ${errData.description || 'Failed to fetch historical data'}`); 
+                }
                 const data = await response.json();
-                await createOrUpdateChart(data); await loadAndDisplayStrategyMarkers(currentScripDetails, tf);
-            } catch (error) { console.error('[loadChartData] Error:', error); showStatusMessage('Error loading chart data.', true); await createOrUpdateChart([]); }
+                await createOrUpdateChart(data); // This also sets currentChartData.lastCandle
+
+                // Subscribe to real-time feed for the new instrument
+                if (currentChartData.socket && currentChartData.instrument) {
+                    subscribeToInstrumentFeed(currentChartData.instrument);
+                }
+
+            } catch (error) { 
+                console.error('[loadChartDataAndUpdateState] Error:', error); 
+                showStatusMessage('Error loading chart data: ' + error.message, true); 
+                currentChartData.instrument = null; // Clear on error
+                await createOrUpdateChart([]); 
+            }
         }
 
+        // --- WebSocket Functions ---
+        function setupWebSocket() {
+            if (currentChartData.socket) { // Close existing if any
+                currentChartData.socket.disconnect();
+            }
+            currentChartData.socket = io(); 
+            const socket = currentChartData.socket;
+
+            socket.on('connect', () => {
+                console.log('WebSocket: Connected. SID:', socket.id);
+                showStatusMessage("WebSocket connected.", false, true);
+                if (currentChartData.instrument && candlestickSeries && !currentChartData.isSubscribed) {
+                    console.log("WebSocket: Re-subscribing to current instrument on connect:", currentChartData.instrument);
+                    subscribeToInstrumentFeed(currentChartData.instrument);
+                }
+            });
+
+            socket.on('disconnect', (reason) => {
+                console.log('WebSocket: Disconnected. Reason:', reason);
+                showStatusMessage("WebSocket disconnected: " + reason, true);
+                currentChartData.isSubscribed = false;
+                currentChartData.currentRoom = null;
+            });
+
+            socket.on('connect_error', (error) => {
+                console.error('WebSocket: Connection Error:', error);
+                showStatusMessage("WebSocket connection error.", true);
+            });
+
+            socket.on('server_message', (data) => console.log('WebSocket (Server):', data.data));
+            socket.on('auth_error', (data) => { console.error('WebSocket Auth Error:', data.message); showStatusMessage("WebSocket Auth Error: " + data.message, true);});
+            socket.on('subscription_ack', (data) => {
+                console.log('WebSocket: Subscription Acknowledged:', data);
+                showStatusMessage(`Subscribed to ${data.instrument.displayName} in room ${data.room}.`, false, true);
+                currentChartData.isSubscribed = true;
+                currentChartData.currentRoom = data.room;
+            });
+            socket.on('subscription_error', (data) => { console.error('WebSocket: Subscription Error:', data); showStatusMessage("Subscription Error: " + data.error, true); currentChartData.isSubscribed = false;});
+            socket.on('unsubscription_ack', (data) => { console.log('WebSocket: Unsubscription Acknowledged:', data); showStatusMessage(`Unsubscribed from ${data.instrument.displayName}.`, false); currentChartData.isSubscribed = false; currentChartData.currentRoom = null;});
+
+            socket.on('market_data_md_1501_full', (tickData) => { // LTP, Touchline
+                if (!candlestickSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
+                
+                const price = parseFloat(tickData.LastTradedPrice);
+                const timeSeconds = parseInt(tickData.LastTradeTime); // XTS usually provides epoch time
+                const volume = parseInt(tickData.LastTradedQunatity) || 0;
+
+                if (isNaN(price) || isNaN(timeSeconds)) return;
+                updateChartCandleWithTick(timeSeconds, price, volume);
+            });
+
+            socket.on('market_data_md_1502_full', (quoteData) => { // Quote data
+                 if (!candlestickSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
+                 // You might want to update Day Open, High, Low, Close if displayed elsewhere,
+                 // or use quoteData.ClosePrice for latest price if LTP is not frequent.
+                 // For candlestick updates from ticks, 1501 is usually primary.
+                 // console.log("Quote Data (1502):", quoteData);
+                 // Potentially update if it has a more recent timestamp than last 1501 tick
+                 const price = parseFloat(quoteData.ClosePrice); // Or TouchlineClosePrice etc.
+                 const timeSeconds = parseInt(quoteData.MessageCodeTimestamp); // Check actual timestamp field for quote
+                 if (!isNaN(price) && !isNaN(timeSeconds)) {
+                    // updateChartCandleWithTick(timeSeconds, price, 0); // Volume might not be applicable here
+                 }
+            });
+            
+            // Example for direct candle data (if XTS provides it for the timeframe)
+            socket.on('market_data_md_1512_full', (candleData) => {
+                if (!candlestickSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
+                
+                // Ensure this candle data is for the current instrument and desired timeframe.
+                // Backend room filtering should handle instrument matching.
+                // Timeframe matching needs to be considered: if this 1512 feed is for, e.g., 1-min candles,
+                // but user is viewing 5-min chart, this direct update might not be right unless aggregated.
+                
+                const newCandle = {
+                    time: parseInt(candleData.Timestamp), // Verify this is UTC epoch seconds
+                    open: parseFloat(candleData.Open),
+                    high: parseFloat(candleData.High),
+                    low: parseFloat(candleData.Low),
+                    close: parseFloat(candleData.Close),
+                    volume: parseInt(candleData.Volume) || 0
+                };
+                if (Object.values(newCandle).some(v => isNaN(v))) { console.warn("Invalid 1512 candle:", candleData); return; }
+                
+                // Check if candleData.Timestamp aligns with currentChartData.timeframeMinutes
+                const expectedInterval = currentChartData.timeframeMinutes * 60;
+                if (newCandle.time % expectedInterval === 0) {
+                    candlestickSeries.update(newCandle);
+                    currentChartData.lastCandle = { ...newCandle }; // Update our tracked candle
+                } else {
+                    // console.warn("Received 1512 candle with misaligned timestamp for current chart timeframe:", newCandle);
+                }
+            });
+        }
+
+        function subscribeToInstrumentFeed(instrument) {
+            if (!currentChartData.socket || !instrument || currentChartData.isSubscribed) {
+                if(currentChartData.isSubscribed) console.log("Already subscribed to an instrument.");
+                return;
+            }
+            console.log(`Attempting to subscribe to: ${instrument.displayName} (${instrument.exchangeSegment}:${instrument.exchangeInstrumentID})`);
+            currentChartData.socket.emit('subscribe_instrument', {
+                exchangeSegment: instrument.exchangeSegment,
+                exchangeInstrumentID: instrument.exchangeInstrumentID
+            });
+        }
+
+        function unsubscribeFromInstrumentFeed(instrument) {
+            if (!currentChartData.socket || !instrument || !currentChartData.isSubscribed) return;
+            console.log(`Attempting to unsubscribe from: ${instrument.displayName}`);
+            currentChartData.socket.emit('unsubscribe_instrument', {
+                exchangeSegment: instrument.exchangeSegment,
+                exchangeInstrumentID: instrument.exchangeInstrumentID
+            });
+            // isSubscribed and currentRoom will be updated on 'unsubscription_ack'
+        }
+
+        function updateChartCandleWithTick(timeSeconds, price, tickVolume) {
+            if (!candlestickSeries || !currentChartData.instrument) return;
+
+            const candleIntervalSeconds = currentChartData.timeframeMinutes * 60;
+            const candleTimestampForTick = Math.floor(timeSeconds / candleIntervalSeconds) * candleIntervalSeconds;
+
+            let lastKnownCandle = currentChartData.lastCandle;
+
+            if (lastKnownCandle && lastKnownCandle.time === candleTimestampForTick) {
+                lastKnownCandle.high = Math.max(lastKnownCandle.high, price);
+                lastKnownCandle.low = Math.min(lastKnownCandle.low, price);
+                lastKnownCandle.close = price;
+                lastKnownCandle.volume = (lastKnownCandle.volume || 0) + (tickVolume || 0);
+                candlestickSeries.update(lastKnownCandle);
+            } else {
+                // New candle
+                const newCandle = {
+                    time: candleTimestampForTick, open: price, high: price, low: price, close: price,
+                    volume: tickVolume || 0
+                };
+                candlestickSeries.update(newCandle);
+                currentChartData.lastCandle = newCandle;
+            }
+        }
+        
+        function updateCurrentTimeframeFromSelector() {
+            const tfValue = timeframeSelect.value;
+            const map = {"1D":1440, "1H":60, "15min":15, "5min":5, "1min":1};
+            currentChartData.timeframeMinutes = map[tfValue] || 1;
+            console.log("Chart timeframe state updated to: " + currentChartData.timeframeMinutes + " minutes.");
+        }
+
+
         // --- Event Listeners ---
-        if(logoutBtnElement) { // Use the renamed const
+        if(logoutBtnElement) {
             logoutBtnElement.addEventListener('click', async (event) => {
-                event.preventDefault(); // Prevent default form submission if it's still a submit button inside a form
-                console.log("[Logout Button] Clicked");
+                event.preventDefault(); 
                 try {
-                    const form = document.getElementById('logout-form'); // Get form to submit if needed, or just fetch
-                    // If your logout is a simple POST request without form data:
-                     await fetch(`${API_BASE_URL}/logout`, { method: 'POST' }); // Ensure correct logout URL from backend
-                     window.location.href = `${API_BASE_URL}/`; 
+                     document.getElementById('logout-form').submit(); // Submit the form for POST logout
                 } catch (error) { console.error("Logout error:", error); showStatusMessage("Logout request failed.", true); }
             });
-        } else { console.error("Logout button element not found!");}
+        }
         
-        if(loadChartBtn) { loadChartBtn.addEventListener('click', async () => { await loadChartData(); }); }
+        if(loadChartBtn) { loadChartBtn.addEventListener('click', loadChartDataAndUpdateState); }
         
-        if(downloadMasterBtn) { /* ... (ensure your download logic is here and API path is /api/...) ... */ }
+        if(timeframeSelect) {
+            timeframeSelect.addEventListener('change', () => {
+                updateCurrentTimeframeFromSelector();
+                // When timeframe changes, reload historical data and resubscribe for that timeframe
+                if (currentChartData.instrument) { // Only if an instrument is already selected
+                    loadChartDataAndUpdateState();
+                }
+            });
+        }
+
+        if(downloadMasterBtn) { 
+            downloadMasterBtn.addEventListener('click', async () => {
+                showStatusMessage("Requesting master contracts download...", false);
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/download-master-contracts`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ segments: ["NSECM", "NSEFO", "MCXFO", "NSECUR"] }) // Specify segments
+                    });
+                    const result = await response.json();
+                    if (response.ok) {
+                        let successMessages = [];
+                        let errorMessages = [];
+                        for (const seg in result) {
+                            if (result[seg].type === 'success') successMessages.push(result[seg].description);
+                            else errorMessages.push(`${seg}: ${result[seg].description}`);
+                        }
+                        let finalMessage = "";
+                        if(successMessages.length > 0) finalMessage += "Success: " + successMessages.join(' ');
+                        if(errorMessages.length > 0) finalMessage += (finalMessage ? " " : "") + "Errors: " + errorMessages.join('; ');
+                        showStatusMessage(finalMessage || "Master contract download process finished.", errorMessages.length > 0, successMessages.length > 0 && errorMessages.length === 0);
+                        if (successMessages.length > 0) await populateScrips(); // Refresh scrip list
+                    } else {
+                        throw new Error(result.error || result.description || "Failed to download master contracts");
+                    }
+                } catch (error) {
+                    console.error("Error downloading master contracts:", error);
+                    showStatusMessage("Error downloading master contracts: " + error.message, true);
+                }
+            });
+        }
+        
         window.addEventListener('resize', () => { if (chart && chartContainer) { chart.applyOptions({ width: chartContainer.clientWidth, height: chartContainer.clientHeight }); } });
 
+        // --- Initialization ---
         document.addEventListener('DOMContentLoaded', async () => {
-            console.log("Chart Page DOM fully loaded.");
-            const localLogoutBtn = document.getElementById('logout-btn'); // Get it here as well, as const might not be ready
-            if(localLogoutBtn) {
-                localLogoutBtn.classList.remove('hidden');
-                console.log("[DOMContentLoaded] Logout button made visible.");
-            } else {
-                console.error("[DOMContentLoaded] logoutBtn element NOT FOUND when DOMContentLoaded fired!");
-            }
-            // User is authenticated if they reached this page (due to backend route protection)
+            console.log("DOM fully loaded and parsed.");
+            if(logoutBtnElement) logoutBtnElement.classList.remove('hidden');
+            
+            updateCurrentTimeframeFromSelector(); // Initialize timeframe state
+            setupWebSocket(); // Initialize WebSocket connection
+            
             showStatusMessage("Loading application data...", false);
-            if (typeof populateScrips === 'function') {
-                await populateScrips();
-            } else {
-                console.error("populateScrips function is not defined!");
-            }
+            await populateScrips(); // This will also load chart for default/first scrip
         });
     </script>
 </body>
