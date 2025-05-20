@@ -6,6 +6,8 @@ import os
 import threading
 from datetime import datetime, timedelta
 import math
+import math
+from collections import OrderedDict # Import OrderedDict to maintain candle order
 import requests
 import socketio # python-socketio
 from flask import Flask, jsonify, request, session, redirect, url_for, render_template
@@ -171,31 +173,96 @@ def get_current_user_xts_client_instance(): # ... (Same as before)
     log.warning(f"Could not get XTS client for {platform_user_id}. Broker creds or XTS session data missing.")
     return None
 
-def format_ohlc_data_for_frontend(ohlc_text): # ... (Same as before - the ETL version)
+# Modified function
+def format_ohlc_data_for_frontend(ohlc_text, interval_minutes_for_aggregation):
     raw_parsed_points = []
-    if not ohlc_text: return []
+    if not ohlc_text:
+        return []
     data_point_strings = ohlc_text.split(',')
-    if not data_point_strings or (len(data_point_strings) == 1 and not data_point_strings[0].strip()): return []
-    for i, point_str in enumerate(data_point_strings):
-        if not point_str.strip(): continue
+    if not data_point_strings or (len(data_point_strings) == 1 and not data_point_strings[0].strip()):
+        return []
+
+    for point_str in data_point_strings:
+        if not point_str.strip():
+            continue
         parts = point_str.split('|')
         if len(parts) >= 6:
             try:
-                ts = int(parts[0]); o, h, l, c = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]); v = int(parts[5])
-                if not all(math.isfinite(val) for val in [ts, o, h, l, c, v]): continue
-                if v < 0: v = 0 
+                ts = int(parts[0])  # Expecting epoch seconds
+                o, h, l, c = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+                v = int(parts[5])
+
+                if not all(math.isfinite(val) for val in [ts, o, h, l, c, v]):
+                    log.debug(f"Skipping point due to non-finite value: {point_str}")
+                    continue
+                if v < 0: 
+                    v = 0 
+                
+                # Basic validation for individual points before aggregation
+                if h < l:
+                    log.debug(f"Skipping point due to high < low: {point_str}")
+                    continue
+
                 raw_parsed_points.append({"time": ts, "open": o, "high": h, "low": l, "close": c, "volume": v})
-            except ValueError: pass
-        else: pass    
-    if not raw_parsed_points: return []
+            except ValueError as e:
+                log.debug(f"Skipping point due to ValueError {e}: {point_str}")
+                pass  # Skip malformed points
+        else:
+            log.debug(f"Skipping point due to insufficient parts: {point_str}")
+            pass # Skip malformed points
+    
+    if not raw_parsed_points:
+        return []
+
+    # Sort points by time - crucial for correct open/close selection
     raw_parsed_points.sort(key=lambda x: x["time"])
-    validated_data = []; last_timestamp = -1
+
+    # --- Aggregation Logic ---
+    aggregated_candles = OrderedDict()
+    interval_seconds = interval_minutes_for_aggregation * 60
+
     for point in raw_parsed_points:
-        if point["high"] < point["low"]: continue
-        if point["time"] <= last_timestamp: continue
-        validated_data.append(point); last_timestamp = point["time"]
-    log.info(f"format_ohlc_data: Initial {len(data_point_strings)}, parsed {len(raw_parsed_points)}, final validated {len(validated_data)}.")
-    return validated_data
+        # Determine the start of the interval for the current point
+        interval_start_time = (point["time"] // interval_seconds) * interval_seconds
+
+        if interval_start_time not in aggregated_candles:
+            # This is the first point in this new interval
+            aggregated_candles[interval_start_time] = {
+                "time": interval_start_time,
+                "open": point["open"],
+                "high": point["high"],
+                "low": point["low"],
+                "close": point["close"],
+                "volume": point["volume"],
+                "_latest_timestamp_in_interval": point["time"] # Helper to track the actual last timestamp
+            }
+        else:
+            # Update existing interval's candle
+            candle = aggregated_candles[interval_start_time]
+            candle["high"] = max(candle["high"], point["high"])
+            candle["low"] = min(candle["low"], point["low"])
+            candle["volume"] += point["volume"]
+            
+            # Close is taken from the latest point in the interval
+            if point["time"] >= candle["_latest_timestamp_in_interval"]:
+                candle["close"] = point["close"]
+                candle["_latest_timestamp_in_interval"] = point["time"]
+
+    # Prepare final list and remove helper field
+    final_candles = []
+    for candle_data in aggregated_candles.values():
+        del candle_data["_latest_timestamp_in_interval"] # Clean up helper
+        # Final validation for the aggregated candle
+        if candle_data["high"] < candle_data["low"]:
+            log.warning(f"Aggregated candle invalid (H<L): {candle_data}")
+            continue
+        final_candles.append(candle_data)
+        
+    # The `last_timestamp` check for duplicate candle times is inherently handled 
+    # by the aggregation logic, as each `interval_start_time` is unique.
+
+    log.info(f"format_ohlc_data: Initial points {len(data_point_strings)}, parsed {len(raw_parsed_points)}, final aggregated candles {len(final_candles)} for interval {interval_minutes_for_aggregation}min.")
+    return final_candles
 
 # --- Flask Routes (Decorators now use 'flask_app') ---
 @flask_app.route('/')
@@ -347,25 +414,52 @@ def get_scrips_api(): # ... (Same as before)
     return jsonify(all_scrips)
 
 @flask_app.route('/api/historical-data', methods=['GET'])
-def get_historical_data_api(): # ... (Same as before, using get_current_user_xts_client_instance and new format_ohlc_data_for_frontend)
-    if not session.get('platform_user_id') or not session.get('xts_logged_in'): return jsonify({"type":"error","description":"Authentication required."}), 401
+def get_historical_data_api():
+    if not session.get('platform_user_id') or not session.get('xts_logged_in'):
+        return jsonify({"type":"error","description":"Authentication required."}), 401
+    
     client = get_current_user_xts_client_instance()
-    if not client: return jsonify({"type":"error","description":"Broker client not available."}), 500
-    sName, tf, seg, iid = request.args.get('scrip'), request.args.get('timeframe'), request.args.get('exchangeSegment'), request.args.get('exchangeInstrumentID')
-    if not (sName and tf and seg and iid): return jsonify({"type":"error", "description":"All parameters required."}), 400
+    if not client:
+        return jsonify({"type":"error","description":"Broker client not available."}), 500
+
+    sName = request.args.get('scrip')
+    tf = request.args.get('timeframe')
+    seg = request.args.get('exchangeSegment')
+    iid = request.args.get('exchangeInstrumentID')
+
+    if not (sName and tf and seg and iid):
+        return jsonify({"type":"error", "description":"All parameters (scrip, timeframe, exchangeSegment, exchangeInstrumentID) are required."}), 400
+
     timeframe_map = {"1D":(1440,730), "1H":(60,90), "15min":(15,30), "5min":(5,15), "1min":(1,7)}
     config = timeframe_map.get(tf)
-    if not config: return jsonify({"type":"error", "description":f"Unsupported TF: {tf}"}), 400
-    compV, daysLB = int(config[0]), int(config[1])
-    endT = datetime.now(); startT_dt = endT - timedelta(days=daysLB)
-    startT_str = startT_dt.strftime("%b %d %Y %H%M"); endT_str = endT.strftime("%b %d %Y %H%M")
+
+    if not config:
+        return jsonify({"type":"error", "description":f"Unsupported timeframe: {tf}. Supported: {list(timeframe_map.keys())}"}), 400
+    
+    compV, daysLB = int(config[0]), int(config[1]) # compV is the interval in minutes
+
+    endT = datetime.now()
+    startT_dt = endT - timedelta(days=daysLB)
+    startT_str = startT_dt.strftime("%b %d %Y %H%M")
+    endT_str = endT.strftime("%b %d %Y %H%M")
+
+    log.info(f"Fetching OHLC for {sName} ({seg}:{iid}) TF:{tf} ({compV}min candles) from {startT_str} to {endT_str}")
+    
     ohlcResp = client.get_ohlc(seg, iid, startT_str, endT_str, compV)
-    if ohlcResp and ohlcResp.get("type")=="success" and "result" in ohlcResp:
-        ohlcTxt = ohlcResp["result"].get("dataReponse","")
-        formatted_data = format_ohlc_data_for_frontend(ohlcTxt)
+
+    if ohlcResp and ohlcResp.get("type") == "success" and "result" in ohlcResp:
+        ohlcTxt = ohlcResp["result"].get("dataReponse", "")
+        if not ohlcTxt:
+            log.info(f"Empty dataReponse from API for {sName} ({seg}:{iid})")
+            log.info(f"OHLC Response {ohlcResp}")
+            return jsonify([]) # Return empty list if no data
+        
+        # Pass compV to the formatting function
+        formatted_data = format_ohlc_data_for_frontend(ohlcTxt, compV) 
         return jsonify(formatted_data)
     else:
-        desc = ohlcResp.get('description','OHLC fetch failed') if isinstance(ohlcResp,dict) else 'OHLC error'
+        desc = ohlcResp.get('description', 'OHLC fetch failed') if isinstance(ohlcResp, dict) else 'OHLC API error'
+        log.error(f"OHLC API error for {sName} ({seg}:{iid}): {desc}. Details: {ohlcResp}")
         return jsonify({"type":"error", "description":desc, "details":ohlcResp}), 500
 
 

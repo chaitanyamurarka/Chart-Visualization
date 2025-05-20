@@ -2,6 +2,7 @@ Flask
 Flask-CORS
 python-socketio
 requests
+collections
 six
 werkzeug
 python-engineio
