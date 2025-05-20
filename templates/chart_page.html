@@ -320,18 +320,26 @@
             socket.on('unsubscription_ack', (data) => { console.log('WebSocket: Unsubscription Acknowledged:', data); showStatusMessage(`Unsubscribed from ${data.instrument.displayName}.`, false); currentChartData.isSubscribed = false; currentChartData.currentRoom = null;});
 
             socket.on('market_data_md_1501_full', (tickData) => { // LTP, Touchline
-                if (!candlestickSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
+                // For debugging, you can log the incoming tickData:
+                // console.log('market_data_md_1501_full:', tickData);
+
+                if (!candlestickSeries || !volumeSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
                 
                 const price = parseFloat(tickData.LastTradedPrice);
                 const timeSeconds = parseInt(tickData.LastTradeTime); // XTS usually provides epoch time
-                const volume = parseInt(tickData.LastTradedQunatity) || 0;
+                
+                // IMPORTANT: Verify 'LastTradedQuantity' is the correct field name from XTS
+                const volume = parseInt(tickData.LastTradedQuantity) || 0; // Corrected typo: LastTradedQunatity -> LastTradedQuantity
 
-                if (isNaN(price) || isNaN(timeSeconds)) return;
+                if (isNaN(price) || isNaN(timeSeconds)) {
+                    // console.warn("Invalid price or time in tickData:", tickData); // Optional: for debugging
+                    return;
+                }
                 updateChartCandleWithTick(timeSeconds, price, volume);
             });
 
             socket.on('market_data_md_1502_full', (quoteData) => { // Quote data
-                 if (!candlestickSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
+                 if (!candlestickSeries || !volumeSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
                  // You might want to update Day Open, High, Low, Close if displayed elsewhere,
                  // or use quoteData.ClosePrice for latest price if LTP is not frequent.
                  // For candlestick updates from ticks, 1501 is usually primary.
@@ -344,14 +352,11 @@
                  }
             });
             
-            // Example for direct candle data (if XTS provides it for the timeframe)
-            socket.on('market_data_md_1512_full', (candleData) => {
-                if (!candlestickSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
-                
-                // Ensure this candle data is for the current instrument and desired timeframe.
-                // Backend room filtering should handle instrument matching.
-                // Timeframe matching needs to be considered: if this 1512 feed is for, e.g., 1-min candles,
-                // but user is viewing 5-min chart, this direct update might not be right unless aggregated.
+            socket.on('market_data_md_1512_full', (candleData) => { // Example for direct candle data
+                // For debugging, you can log the incoming candleData:
+                // console.log('market_data_md_1512_full:', candleData);
+
+                if (!candlestickSeries || !volumeSeries || !currentChartData.instrument || !currentChartData.isSubscribed) return;
                 
                 const newCandle = {
                     time: parseInt(candleData.Timestamp), // Verify this is UTC epoch seconds
@@ -361,12 +366,20 @@
                     close: parseFloat(candleData.Close),
                     volume: parseInt(candleData.Volume) || 0
                 };
-                if (Object.values(newCandle).some(v => isNaN(v))) { console.warn("Invalid 1512 candle:", candleData); return; }
+
+                if (Object.values(newCandle).some(v => isNaN(v))) { 
+                    // console.warn("Invalid 1512 candle data:", candleData); // Optional: for debugging
+                    return; 
+                }
                 
-                // Check if candleData.Timestamp aligns with currentChartData.timeframeMinutes
                 const expectedInterval = currentChartData.timeframeMinutes * 60;
-                if (newCandle.time % expectedInterval === 0) {
+                if (newCandle.time % expectedInterval === 0) { // Ensure candle aligns with current chart timeframe
                     candlestickSeries.update(newCandle);
+                    volumeSeries.update({ // Added volume series update
+                        time: newCandle.time,
+                        value: newCandle.volume,
+                        color: newCandle.close >= newCandle.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)'
+                    });
                     currentChartData.lastCandle = { ...newCandle }; // Update our tracked candle
                 } else {
                     // console.warn("Received 1512 candle with misaligned timestamp for current chart timeframe:", newCandle);
@@ -382,7 +395,8 @@
             console.log(`Attempting to subscribe to: ${instrument.displayName} (${instrument.exchangeSegment}:${instrument.exchangeInstrumentID})`);
             currentChartData.socket.emit('subscribe_instrument', {
                 exchangeSegment: instrument.exchangeSegment,
-                exchangeInstrumentID: instrument.exchangeInstrumentID
+                exchangeInstrumentID: instrument.exchangeInstrumentID,
+                displayName: instrument.displayName // Pass displayName for ack message
             });
         }
 
@@ -391,13 +405,18 @@
             console.log(`Attempting to unsubscribe from: ${instrument.displayName}`);
             currentChartData.socket.emit('unsubscribe_instrument', {
                 exchangeSegment: instrument.exchangeSegment,
-                exchangeInstrumentID: instrument.exchangeInstrumentID
+                exchangeInstrumentID: instrument.exchangeInstrumentID,
+                displayName: instrument.displayName // Pass displayName for ack message
             });
             // isSubscribed and currentRoom will be updated on 'unsubscription_ack'
         }
 
+        // *** UPDATED FUNCTION ***
         function updateChartCandleWithTick(timeSeconds, price, tickVolume) {
-            if (!candlestickSeries || !currentChartData.instrument) return;
+            if (!candlestickSeries || !volumeSeries || !currentChartData.instrument) {
+                // console.warn("Skipping tick update: series or instrument not ready."); // Optional: for debugging
+                return;
+            }
 
             const candleIntervalSeconds = currentChartData.timeframeMinutes * 60;
             const candleTimestampForTick = Math.floor(timeSeconds / candleIntervalSeconds) * candleIntervalSeconds;
@@ -405,19 +424,37 @@
             let lastKnownCandle = currentChartData.lastCandle;
 
             if (lastKnownCandle && lastKnownCandle.time === candleTimestampForTick) {
+                // Tick belongs to the currently forming candle
                 lastKnownCandle.high = Math.max(lastKnownCandle.high, price);
                 lastKnownCandle.low = Math.min(lastKnownCandle.low, price);
                 lastKnownCandle.close = price;
                 lastKnownCandle.volume = (lastKnownCandle.volume || 0) + (tickVolume || 0);
+
                 candlestickSeries.update(lastKnownCandle);
+                volumeSeries.update({
+                    time: lastKnownCandle.time,
+                    value: lastKnownCandle.volume,
+                    color: lastKnownCandle.close >= lastKnownCandle.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)'
+                });
             } else {
-                // New candle
+                // Tick belongs to a new candle
                 const newCandle = {
-                    time: candleTimestampForTick, open: price, high: price, low: price, close: price,
+                    time: candleTimestampForTick,
+                    open: price, // Open of the new candle is the price of its first tick
+                    high: price,
+                    low: price,
+                    close: price,
                     volume: tickVolume || 0
                 };
+
                 candlestickSeries.update(newCandle);
-                currentChartData.lastCandle = newCandle;
+                volumeSeries.update({
+                    time: newCandle.time,
+                    value: newCandle.volume,
+                    // Color for a new volume bar; follows open/close logic
+                    color: newCandle.close >= newCandle.open ? 'rgba(38,166,154,0.5)' : 'rgba(239,83,80,0.5)'
+                });
+                currentChartData.lastCandle = newCandle; // Update the last known candle state
             }
         }
         
